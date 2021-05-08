@@ -1,13 +1,264 @@
+import imageio
+import scipy.ndimage
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import tempfile
 
+import shutil
 import os
 import copy
+import time
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 
 import nibabel as nib
+import concurrent.futures
+
+
+def timing(func):
+    def wrapper(*arg, **kw):
+        t1 = time.time()
+        res = func(*arg, **kw)
+        t2 = time.time()
+        print(func.__name__, 'took', t2 - t1, 's')
+
+    return wrapper
+
+
+class RsomLayerDataset(Dataset):
+    """
+    rsom dataset class for layer segmentation
+    
+    Args:
+        root_dir (string): Directory with all the nii.gz files.
+        data_str (string): end part of filename of training data.
+        label_str (string): end part of filename of segmentation ground truth data.
+        transform (callable, optional): Optional transform to be applied
+                            on a sample.
+    """
+
+    def __init__(self,
+                 root_dir,
+                 data_str='_rgb.nii.gz',
+                 label_str='_l.nii.gz',
+                 batch_size=2,
+                 sliding_window_size=9,
+                 training=True,
+                 transform=None):
+
+        super().__init__()
+
+        assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
+            'root_dir not a valid directory'
+
+        self.batch_size = batch_size
+        self.root_dir = root_dir
+        self.transform = transform
+        self.training = training
+        self.sliding_window_size = sliding_window_size
+
+        # for debug
+        self.write_png = True
+
+        assert isinstance(data_str, str) and isinstance(label_str, str), \
+            'data_str or label_str not valid.'
+
+        self.data_str = data_str
+        self.label_str = label_str
+
+        # get all files in root_dir
+        all_files = os.listdir(path=root_dir)
+        # extract the data files
+        self.data = [el for el in all_files if el[-len(data_str):] == data_str]
+
+        if self.training:
+            assert len(self.data) == \
+                   len([el for el in all_files if el[-len(label_str):] == label_str]), \
+                'Amount of data and label files not equal.'
+
+        if self.training:
+            self.npz_root_dir = os.path.join(root_dir, 'npz_files')
+            self.npz_data_x = []
+            self.npz_data_y = []
+            if not os.path.exists(self.npz_root_dir):
+                os.mkdir(self.npz_root_dir)
+
+            self._preprocess_files()
+
+        # generate lists for batch size
+        self.npz_data_x = np.asarray(self.npz_data_x)
+        self.npz_data_y = np.asarray(self.npz_data_y)
+
+        self.npz_data_x = self.npz_data_x[torch.randperm(len(self.npz_data_x)).numpy()]
+        self.npz_data_y = self.npz_data_y[torch.randperm(len(self.npz_data_y)).numpy()]
+
+        self.npz_batches_x = np.array_split(self.npz_data_x, len(self.npz_data_x) // self.batch_size + 1)
+        self.npz_batches_y = np.array_split(self.npz_data_y, len(self.npz_data_y) // self.batch_size + 1)
+        map(lambda x: x.tolist(), self.npz_batches_x)
+        map(lambda x: x.tolist(), self.npz_batches_y)
+
+        self.npz_batches = self.npz_batches_x + self.npz_batches_y
+
+    def cleanup(self):
+        if self.training:
+            shutil.rmtree(self.npz_root_dir)
+
+
+    @timing
+    def _preprocess_files(self):
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        results = executor.map(self._preprocess_file, self.data)
+
+        for _ in results:
+            # wait for threads to finish.
+            pass
+
+    def _preprocess_file(self, file):
+        data_path = os.path.join(self.root_dir,
+                                 file)
+        label_path = os.path.join(self.root_dir,
+                                  file.replace(self.data_str, self.label_str))
+
+        # read data
+        data = self._readNII(data_path)
+        data = np.stack([data['R'], data['G'], data['B']], axis=-1)
+        #data = data.astype(np.float32)
+
+        # read label
+        label = self._readNII(label_path)
+        #label = label.astype(np.float32)
+
+        data = data.astype(np.uint8)
+        label = label.astype(np.uint8)
+
+        data_mip_x, data_mip_y = self.sliding_window_mip(data)
+
+        data_list_x = np.split(data_mip_x, data_mip_x.shape[1], axis=1)
+        data_list_y = np.split(data_mip_y, data_mip_y.shape[2], axis=2)
+
+        label_list_x = np.split(label, label.shape[1], axis=1)
+        label_list_y = np.split(label, label.shape[2], axis=2)
+
+
+        for idx, element in enumerate(zip(data_list_x, label_list_x)):
+            data, label = element
+
+            npz_file = os.path.join(self.npz_root_dir,
+                                    file.replace(self.data_str,
+                                                 '_xframe' + str(idx) + '.npz'))
+            self.npz_data_x.append(npz_file)
+
+            with open(npz_file, 'wb') as f:
+                np.savez(npz_file, data=data, label=label)
+
+            if self.write_png:
+                imageio.imwrite(npz_file.replace('.npz', '_rgb.png'), np.squeeze(data))
+                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label))
+
+        for idx, element in enumerate(zip(data_list_y, label_list_y)):
+            # print('y', idx, data.shape, label.shape)
+            data, label = element
+            npz_file = os.path.join(self.npz_root_dir,
+                                    file.replace(self.data_str,
+                                                 '_yframe' + str(idx) + '.npz'))
+            self.npz_data_y.append(npz_file)
+
+            with open(npz_file, 'wb') as f:
+                np.savez(npz_file, data=data, label=label)
+            if self.write_png:
+                imageio.imwrite(npz_file.replace('.npz', '_rgb.png'), np.squeeze(data))
+                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label))
+
+    def sliding_window_mip(self, data):
+        data_mip_x = scipy.ndimage.maximum_filter1d(data, size=self.sliding_window_size, axis=1)
+        data_mip_y = scipy.ndimage.maximum_filter1d(data, size=self.sliding_window_size, axis=2)
+
+        return data_mip_x, data_mip_y
+
+    @staticmethod
+    def _readNII(rpath):
+        '''
+        read in the .nii.gz file
+
+        '''
+
+        img = nib.load(str(rpath))
+
+        # TODO: when does nib get_fdata() support rgb?
+        # currently not, need to use old method get_data()
+        return img.get_data()
+
+    def __len__(self):
+        pass
+
+    def _getitem_train(self, idx):
+        data = []
+        label = []
+        for npz_file in self.npz_batches[idx]:
+            print(npz_file)
+            with open(npz_file, 'rb') as f:
+                tmp = np.load(npz_file)
+
+            data.append(tmp['data'])
+            label.append(tmp['label'])
+
+        data_batch = np.concatenate(data, axis=1)
+        label_batch = np.concatenate(label, axis=1)
+
+        # add meta information
+        meta = {'filename': self.data[idx],
+                'dcrop': {'begin': None, 'end': None},
+                'lcrop': {'begin': None, 'end': None},
+                'weight': 0}
+
+        sample = {'data': data_batch, 'label': label_batch, 'meta': meta}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+    def __getitem__(self, idx):
+        if self.training:
+            return self._getitem_train(idx)
+        else:
+            return self._getitem_test(idx)
+
+    def _getitem_test(self, idx):
+        # TODO process both sides? x and y. either return list [x, y] or stack on top
+        return self._getvolume(idx)
+
+    def _getvolume(self, idx):
+        data_path = os.path.join(self.root_dir,
+                                 self.data[idx])
+        label_path = os.path.join(self.root_dir,
+                                  self.data[idx].replace(self.data_str, self.label_str))
+
+        # read data
+        data = self._readNII(data_path)
+        data = np.stack([data['R'], data['G'], data['B']], axis=-1)
+        data = data.astype(np.float32)
+
+        # read label
+        label = self._readNII(label_path)
+        label = label.astype(np.float32)
+
+        # add meta information
+        meta = {'filename': self.data[idx],
+                'dcrop': {'begin': None, 'end': None},
+                'lcrop': {'begin': None, 'end': None},
+                'weight': 0}
+
+        sample = {'data': data, 'label': label, 'meta': meta}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
 
 class RSOMLayerDataset(Dataset):
     """
@@ -21,49 +272,48 @@ class RSOMLayerDataset(Dataset):
                             on a sample.
     """
 
-    def __init__(self, 
-                 root_dir, 
-                 data_str='_rgb.nii.gz', 
+    def __init__(self,
+                 root_dir,
+                 data_str='_rgb.nii.gz',
                  label_str='_l.nii.gz',
                  slice_wise=False,
                  transform=None):
 
         assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
-        'root_dir not a valid directory'
-        
+            'root_dir not a valid directory'
+
         self.root_dir = root_dir
         self.transform = transform
-        
+
         assert isinstance(data_str, str) and isinstance(label_str, str), \
-        'data_str or label_str not valid.'
-        
+            'data_str or label_str not valid.'
+
         self.data_str = data_str
         self.label_str = label_str
         self.slice_wise = slice_wise
-        
+
         # get all files in root_dir
-        all_files = os.listdir(path = root_dir)
+        all_files = os.listdir(path=root_dir)
         # extract the  data files
         self.data = [el for el in all_files if el[-len(data_str):] == data_str]
 
         if self.slice_wise:
-            data_path = os.path.join(self.root_dir, 
+            data_path = os.path.join(self.root_dir,
                                      self.data[0])
-            label_path = os.path.join(self.root_dir, 
+            label_path = os.path.join(self.root_dir,
                                       self.data[0].replace(self.data_str, self.label_str))
-        
+
             # read data
             data = self._readNII(data_path)
             data = np.stack([data['R'], data['G'], data['B']], axis=-1)
             self.data_array = data.astype(np.float32)
-        
+
             # read label
             label = self._readNII(label_path)
             self.label_array = label.astype(np.float32)
 
-        
         assert len(self.data) == \
-            len([el for el in all_files if el[-len(label_str):] == label_str]), \
+               len([el for el in all_files if el[-len(label_str):] == label_str]), \
             'Amount of data and label files not equal.'
 
     def __len__(self):
@@ -71,7 +321,7 @@ class RSOMLayerDataset(Dataset):
             return len(self.data)
         else:
             return self.data_array.shape[1]
-    
+
     @staticmethod
     def _readNII(rpath):
         '''
@@ -79,9 +329,9 @@ class RSOMLayerDataset(Dataset):
         Args:
             rpath (string)
         '''
-        
+
         img = nib.load(str(rpath))
-        
+
         # TODO: when does nib get_fdata() support rgb?
         # currently not, need to use old method get_data()
         return img.get_data()
@@ -91,26 +341,26 @@ class RSOMLayerDataset(Dataset):
             return self.getvolume(idx)
         else:
             return self.getslice(idx)
-    
+
     def getvolume(self, idx):
-        data_path = os.path.join(self.root_dir, 
+        data_path = os.path.join(self.root_dir,
                                  self.data[idx])
-        label_path = os.path.join(self.root_dir, 
+        label_path = os.path.join(self.root_dir,
                                   self.data[idx].replace(self.data_str, self.label_str))
-        
+
         # read data
         data = self._readNII(data_path)
         data = np.stack([data['R'], data['G'], data['B']], axis=-1)
         data = data.astype(np.float32)
-        
+
         # read label
         label = self._readNII(label_path)
         label = label.astype(np.float32)
-        
+
         # add meta information
         meta = {'filename': self.data[idx],
-                'dcrop':{'begin': None, 'end': None},
-                'lcrop':{'begin': None, 'end': None},
+                'dcrop': {'begin': None, 'end': None},
+                'lcrop': {'begin': None, 'end': None},
                 'weight': 0}
 
         sample = {'data': data, 'label': label, 'meta': meta}
@@ -120,16 +370,16 @@ class RSOMLayerDataset(Dataset):
 
         return sample
 
-    def getslice(self,idx):
-        data = self.data_array[:,idx,...]
-        data = np.expand_dims(data,1)
-        
-        label = self.label_array[:,idx,...]
-        label = np.expand_dims(label,1)
+    def getslice(self, idx):
+        data = self.data_array[:, idx, ...]
+        data = np.expand_dims(data, 1)
+
+        label = self.label_array[:, idx, ...]
+        label = np.expand_dims(label, 1)
         # add meta information
         meta = {'filename': self.data[0] + " slice_wise " + str(idx),
-                'dcrop':{'begin': None, 'end': None},
-                'lcrop':{'begin': None, 'end': None},
+                'dcrop': {'begin': None, 'end': None},
+                'lcrop': {'begin': None, 'end': None},
                 'weight': 0}
 
         sample = {'data': data, 'label': label, 'meta': meta}
@@ -138,7 +388,6 @@ class RSOMLayerDataset(Dataset):
             sample = self.transform(sample)
 
         return sample
-
 
 
 class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
@@ -152,48 +401,48 @@ class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
         transform (callable, optional): Optional transform to be applied
                             on a sample.
     """
+
     def __init__(self, root_dir, data_str='_rgb.nii.gz', transform=None):
-        
         assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
-        'root_dir not a valid directory'
-        
+            'root_dir not a valid directory'
+
         self.root_dir = root_dir
         self.transform = transform
-        
+
         assert isinstance(data_str, str), 'data_str or label_str not valid.'
-        
+
         self.data_str = data_str
         # self.label_str = ''
-        self.slice_wise = False        
+        self.slice_wise = False
         # get all files in root_dir
-        all_files = os.listdir(path = root_dir)
+        all_files = os.listdir(path=root_dir)
         # extract the  data files
         self.data = [el for el in all_files if el[-len(data_str):] == data_str]
-        
+
         # assert len(self.data) == \
-            # len([el for el in all_files if el[-len(label_str):] == label_str]), \
-            # 'Amount of data and label files not equal.'
+        # len([el for el in all_files if el[-len(label_str):] == label_str]), \
+        # 'Amount of data and label files not equal.'
 
     def __getitem__(self, idx):
-        data_path = os.path.join(self.root_dir, 
-                            self.data[idx])
+        data_path = os.path.join(self.root_dir,
+                                 self.data[idx])
         # label_path = os.path.join(self.root_dir, 
         #                            self.data[idx].replace(self.data_str, self.label_str))
-        
+
         # read data
         data = self._readNII(data_path)
         data = np.stack([data['R'], data['G'], data['B']], axis=-1)
         data = data.astype(np.float32)
-        
+
         # read label
         # label = self._readNII(label_path)
         # label = label.astype(np.float32)
         label = np.zeros((data.shape[0], data.shape[1], data.shape[2]), dtype=np.float32)
-        
+
         # add meta information
         meta = {'filename': self.data[idx],
-                'dcrop':{'begin': None, 'end': None},
-                'lcrop':{'begin': None, 'end': None},
+                'dcrop': {'begin': None, 'end': None},
+                'lcrop': {'begin': None, 'end': None},
                 'weight': 0}
 
         sample = {'data': data, 'label': label, 'meta': meta}
@@ -203,49 +452,51 @@ class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
 
         return sample
 
+
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
+
     def __init__(self, shuffle=False):
         self.shuffle = shuffle
+
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
-        
+
         ################ UPDATE
         # data can either RGB or RG
 
         # data is [Z x X x Y x 3] [500 x 171 x 333 x 3]
         # label is [Z x X x Y] [500 x 171 x 333]
-        
+
         # we want one sample to be [Z x Y x 3]  2D rgb image
-        
+
         # numpy array size of images
         # [H x W x C]
         # torch tensor size of images
         # [C x H x W]
-        
+
         # and for batches
         # [B x C x H x W]
-        
+
         # here, X is the batch size.
         # so we want to reshape to
         # [X x C x Z x Y] [171 x 3 x 500 x 333]
         data = data.transpose((1, 3, 0, 2))
-        
+
         # and for the label
         # [X x Z x Y] [171 x 500 x 333]
         label = label.transpose((1, 0, 2))
-        
-        if data.shape[0] > 1 and self.shuffle:
-           ds = data.shape
-           ls = label.shape
-           idx = torch.randperm(data.shape[0]).numpy()
-           data = data[idx]
-           label = label[idx]
-           data = np.ascontiguousarray(data)
-           label = np.ascontiguousarray(label)
-           assert ds == data.shape
-           assert ls == label.shape
 
+        if data.shape[0] > 1 and self.shuffle:
+            ds = data.shape
+            ls = label.shape
+            idx = torch.randperm(data.shape[0]).numpy()
+            data = data[idx]
+            label = label[idx]
+            data = np.ascontiguousarray(data)
+            label = np.ascontiguousarray(label)
+            assert ds == data.shape
+            assert ls == label.shape
 
         data = torch.from_numpy(data)
         label = torch.from_numpy(label)
@@ -253,6 +504,7 @@ class ToTensor(object):
         return {'data': data.contiguous(),
                 'label': label.contiguous(),
                 'meta': meta}
+
 
 class RandomZShift(object):
     """Apply random z-shift to sample.
@@ -276,27 +528,27 @@ class RandomZShift(object):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, np.ndarray)
         assert isinstance(label, np.ndarray)
-        
+
         # initial shape
         data_ishape = data.shape
         label_ishape = label.shape
-        
+
         # generate random dz offset
         dz = int(round((self.max_shift[1] - self.max_shift[0]) * torch.rand(1).item() + self.max_shift[0]))
         assert (dz >= self.max_shift[0] and dz <= self.max_shift[1])
-         
+
         if dz:
-            shift_data = np.zeros(((abs(dz), ) + data.shape[1:]), dtype = np.uint8)
-            shift_label = np.zeros(((abs(dz), ) + label.shape[1:]), dtype = np.uint8)
-        
+            shift_data = np.zeros(((abs(dz),) + data.shape[1:]), dtype=np.uint8)
+            shift_label = np.zeros(((abs(dz),) + label.shape[1:]), dtype=np.uint8)
+
             # print('RandomZShift: Check if this array modification does the correct thing before actually using it')
             # print('ZShift:', dz)
             # positive dz will shift in +z direction, "downwards" inside skin
-            data = np.concatenate((shift_data, data[:-abs(dz),:,:,:])\
-                    if dz > 0 else (data[abs(dz):,:,:,:], shift_data), axis = 0)
-            label = np.concatenate((shift_label, label[:-abs(dz),:,:])\
-                    if dz > 0 else (label[abs(dz):,:,:], shift_label), axis = 0)
-            
+            data = np.concatenate((shift_data, data[:-abs(dz), :, :, :]) \
+                                      if dz > 0 else (data[abs(dz):, :, :, :], shift_data), axis=0)
+            label = np.concatenate((shift_label, label[:-abs(dz), :, :]) \
+                                       if dz > 0 else (label[abs(dz):, :, :], shift_label), axis=0)
+
             # data = np.concatenate((data[:-abs(dz),:,:,:], shift_data)\
             #         if dz > 0 else (shift_data, data[abs(dz):,:,:,:]), axis = 0)
             # label = np.concatenate((label[:-abs(dz),:,:], shift_label)\
@@ -307,32 +559,36 @@ class RandomZShift(object):
             data = np.ascontiguousarray(data)
             label = np.ascontiguousarray(label)
         return {'data': data, 'label': label, 'meta': meta}
-    
+
+
 class ZeroCenter(object):
     """ 
     Zero center input volumes
-    """    
+    """
+
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, np.ndarray)
         assert isinstance(label, np.ndarray)
         # data still is RGB
         assert data.shape[3] == 3
-        
+
         # compute for all x,y,z mean for every color channel
         # rgb_mean = np.around(np.mean(data, axis=(0, 1, 2))).astype(np.int16)
         # meanvec = np.tile(rgb_mean, (data.shape[:-1] + (1,)))
-       
+
         # how to zero center??
         # data -= 127
-        
+
         return {'data': data, 'label': label, 'meta': meta}
-    
+
+
 class DropBlue(object):
     """
     Drop the last slice of the RGB dimension
     RSOM images are 2channel, so blue is empty anyways.
     """
+
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, np.ndarray)
@@ -340,16 +596,18 @@ class DropBlue(object):
         # data still is RGB
         assert data.shape[3] == 3
 
-        data = data[:,:,:,:2]
+        data = data[:, :, :, :2]
 
         assert data.shape[3] == 2
 
         return {'data': data, 'label': label, 'meta': meta}
 
+
 class SwapDim(object):
     """
     swap x and y dimension to train network for the other view
     """
+
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, np.ndarray)
@@ -359,11 +617,12 @@ class SwapDim(object):
 
         # data is [Z x X x Y x 3] [500 x 171 x 333 x 3]
         # label is [Z x X x Y] [500 x 171 x 333]
-        
+
         data = np.swapaxes(data, 1, 2)
         label = np.swapaxes(label, 1, 2)
-       
+
         return {'data': data, 'label': label, 'meta': meta}
+
 
 class precalcLossWeight(object):
     """
@@ -372,6 +631,7 @@ class precalcLossWeight(object):
     so it can be computed in parallel
     call only after ToTensor!!
     """
+
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, torch.Tensor)
@@ -379,33 +639,31 @@ class precalcLossWeight(object):
 
         # weight is meta['weight']
 
-        #TODO: calculation
+        # TODO: calculation
         target = label
 
         # LOSS shape [Minibatch, Z, X]
         target_shp = target.shape
         weight = copy.deepcopy(target)
 
- 
         # loop over dim 0 and 2
         for yy in np.arange(target_shp[0]):
             for xx in np.arange(target_shp[2]):
-                
                 idx_nz = torch.nonzero(target[yy, :, xx])
                 idx_beg = idx_nz[0].item()
 
                 idx_end = idx_nz[-1].item()
                 # weight[yy,:idx_beg,xx] = np.flip(scalingfn(idx_beg))
                 # print(idx_beg, idx_end)
-                
+
                 A = self.scalingfn(idx_beg)
                 B = self.scalingfn(target_shp[1] - idx_end)
 
-                weight[yy,:idx_beg,xx] = A.unsqueeze(0).flip(1).squeeze()
+                weight[yy, :idx_beg, xx] = A.unsqueeze(0).flip(1).squeeze()
                 # print('A reversed', A.unsqueeze(0).flip(1).squeeze())
                 # print('A', A)
-                
-                weight[yy,idx_end:,xx] = B
+
+                weight[yy, idx_end:, xx] = B
                 # weight[yy,:idx_beg,xx] = np.flip(scalingfn(idx_beg))
                 # weight[yy,idx_end:,xx] = scalingfn(label_shp[1] - idx_end)
 
@@ -422,48 +680,49 @@ class precalcLossWeight(object):
         y = torch.arange(l) + 1
         return y
 
+
 class CropToEven(object):
     """ 
     if Volume shape is not even numbers, simply crop the first element
     except for last dimension, this is RGB  = 3
     """
-    def __init__(self,network_depth=3):
+
+    def __init__(self, network_depth=3):
         # how the unet works, without getting a upscaling error, the input shape must be a multiplier of 2**(network_depth-1)
-        self.maxdiv = 2**(network_depth - 1)
+        self.maxdiv = 2 ** (network_depth - 1)
         self.network_depth = network_depth
 
     def __call__(self, sample):
         data, label, meta = sample['data'], sample['label'], sample['meta']
         assert isinstance(data, np.ndarray)
         assert isinstance(label, np.ndarray)
-       
+
         # for backward compatibility
         # easy version: first crop to even, crop rest afterwards, if necessary
         initial_dshape = data.shape
         initial_lshape = label.shape
 
         IsOdd = np.mod(data.shape[:-1], 2)
-        
+
         # hack, don't need to crop along what will be batch dimension later on
         IsOdd[1] = 0
 
-        data = data[IsOdd[0]:, IsOdd[1]:, IsOdd[2]:, : ]
+        data = data[IsOdd[0]:, IsOdd[1]:, IsOdd[2]:, :]
         label = label[IsOdd[0]:, IsOdd[1]:, IsOdd[2]:]
 
         if not isinstance(meta['weight'], int):
             raise NotImplementedError('Weight was calulated before. Cropping implementation missing')
-        
+
         # save, how much data was cropped
         # using torch tensor, because dataloader will convert anyways
         # dcrop = data
         meta['dcrop']['begin'] = torch.from_numpy(np.array([IsOdd[0], IsOdd[1], IsOdd[2], 0], dtype=np.int16))
         meta['dcrop']['end'] = torch.from_numpy(np.array([0, 0, 0, 0], dtype=np.int16))
-        
+
         # lcrop = label
         meta['lcrop']['begin'] = torch.from_numpy(np.array([IsOdd[0], IsOdd[1], IsOdd[2]], dtype=np.int16))
         meta['lcrop']['end'] = torch.from_numpy(np.array([0, 0, 0], dtype=np.int16))
 
-        
         # before cropping
         #            [Z  x Batch x Y  x 3]
         # data shape [500 x 171 x 333 x 3]
@@ -471,43 +730,45 @@ class CropToEven(object):
         # data shape [500 x 170 x 332 x 3]
 
         # need to crop Z and Y
-        
+
         # check if Z and Y are divisible through self.maxdiv
         rem0 = np.mod(data.shape[0], self.maxdiv)
         rem2 = np.mod(data.shape[2], self.maxdiv)
-        
+
         if rem0 or rem2:
             if rem0:
                 # crop Z
-                data = data[int(np.floor(rem0/2)):-int(np.ceil(rem0/2)), :, :, :]
-                label = label[int(np.floor(rem0/2)):-int(np.ceil(rem0/2)), :, :]
+                data = data[int(np.floor(rem0 / 2)):-int(np.ceil(rem0 / 2)), :, :, :]
+                label = label[int(np.floor(rem0 / 2)):-int(np.ceil(rem0 / 2)), :, :]
 
             if rem2:
                 # crop Y
-                data = data[ :, :, int(np.floor(rem2/2)):-int(np.ceil(rem2/2)), :]
-                label = label[:, :, int(np.floor(rem2/2)):-int(np.ceil(rem2/2))]
-        
+                data = data[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2)), :]
+                label = label[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2))]
+
             # add to meta information, how much has been cropped
-            meta['dcrop']['begin'] += torch.from_numpy(np.array([np.floor(rem0/2), 0, np.floor(rem2/2), 0], dtype=np.int16))
-            meta['dcrop']['end'] += torch.from_numpy(np.array([np.ceil(rem0/2), 0, np.ceil(rem2/2), 0], dtype=np.int16))
-                
-            meta['lcrop']['begin'] += torch.from_numpy(np.array([np.floor(rem0/2), 0, np.floor(rem2/2)], dtype=np.int16))
-            meta['lcrop']['end'] += torch.from_numpy(np.array([np.ceil(rem0/2), 0, np.ceil(rem2/2)], dtype=np.int16))
+            meta['dcrop']['begin'] += torch.from_numpy(
+                np.array([np.floor(rem0 / 2), 0, np.floor(rem2 / 2), 0], dtype=np.int16))
+            meta['dcrop']['end'] += torch.from_numpy(
+                np.array([np.ceil(rem0 / 2), 0, np.ceil(rem2 / 2), 0], dtype=np.int16))
+
+            meta['lcrop']['begin'] += torch.from_numpy(
+                np.array([np.floor(rem0 / 2), 0, np.floor(rem2 / 2)], dtype=np.int16))
+            meta['lcrop']['end'] += torch.from_numpy(
+                np.array([np.ceil(rem0 / 2), 0, np.ceil(rem2 / 2)], dtype=np.int16))
 
         assert np.all(np.array(initial_dshape) == meta['dcrop']['begin'].numpy()
-                + meta['dcrop']['end'].numpy()
-                + np.array(data.shape)),\
-                'Shapes and Crop do not match'
+                      + meta['dcrop']['end'].numpy()
+                      + np.array(data.shape)), \
+            'Shapes and Crop do not match'
 
         assert np.all(np.array(initial_lshape) == meta['lcrop']['begin'].numpy()
-                + meta['lcrop']['end'].numpy()
-                + np.array(label.shape)),\
-                'Shapes and Crop do not match'
+                      + meta['lcrop']['end'].numpy()
+                      + np.array(label.shape)), \
+            'Shapes and Crop do not match'
 
         return {'data': data, 'label': label, 'meta': meta}
-    
-    
-    
+
 
 def to_numpy(V, meta):
     '''
@@ -523,14 +784,14 @@ def to_numpy(V, meta):
     # [X x C x Z x Y] [171 x 3 x 500-crop x 333] (without crop)
     # and for the label
     # [X x Z x Y] [171 x 500 x 333]
-    
+
     # we want to reshape to
     # numpy sizes
     # data
     # [Z x X x Y x 3] [500 x 171 x 333 x 3]
     # label
     # [Z x X x Y] [500 x 171 x 333]
-    
+
     # here: we only need to backtransform labels
     if not isinstance(V, np.ndarray):
         assert isinstance(V, torch.Tensor)
@@ -542,18 +803,23 @@ def to_numpy(V, meta):
 
     # structure for np.pad
     # (before0, after0), (before1, after1), ..)
-    
+
     # parse label crop
     b = (meta['lcrop']['begin']).numpy().squeeze()
     e = (meta['lcrop']['end']).numpy().squeeze()
     # print('b, e')
     # print(b, e)
     # print(b.shape, e.shape)
-    
+
     pad_width = ((b[0], e[0]), (b[1], e[1]), (b[2], e[2]))
     # print(V.shape)
-    
+
     V = np.pad(V, pad_width, 'edge')
 
     # print(V.shape)
     return V
+
+
+if __name__ == '__main__':
+    dataset = RsomLayerDataset(root_dir='/home/stefan/Documents/RSOM/Examples20210505/one_file')
+    el = dataset[0]

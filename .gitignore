@@ -39,3 +39,6 @@ main.pdf
 *.synctex.gz(busy)
 *.pdfsync
 
+
+# PYCHARM
+.idea
