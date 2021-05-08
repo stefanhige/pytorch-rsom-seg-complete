@@ -59,7 +59,7 @@ class RsomLayerDataset(Dataset):
         self.sliding_window_size = sliding_window_size
 
         # for debug
-        self.write_png = True
+        self.write_png = False
 
         assert isinstance(data_str, str) and isinstance(label_str, str), \
             'data_str or label_str not valid.'
@@ -154,7 +154,7 @@ class RsomLayerDataset(Dataset):
 
             if self.write_png:
                 imageio.imwrite(npz_file.replace('.npz', '_rgb.png'), np.squeeze(data))
-                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label))
+                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label*255))
 
         for idx, element in enumerate(zip(data_list_y, label_list_y)):
             # print('y', idx, data.shape, label.shape)
@@ -168,7 +168,7 @@ class RsomLayerDataset(Dataset):
                 np.savez(npz_file, data=data, label=label)
             if self.write_png:
                 imageio.imwrite(npz_file.replace('.npz', '_rgb.png'), np.squeeze(data))
-                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label))
+                imageio.imwrite(npz_file.replace('.npz', '_l.png'), np.squeeze(label*255))
 
     def sliding_window_mip(self, data):
         data_mip_x = scipy.ndimage.maximum_filter1d(data, size=self.sliding_window_size, axis=1)
@@ -195,19 +195,22 @@ class RsomLayerDataset(Dataset):
     def _getitem_train(self, idx):
         data = []
         label = []
+        filenames = []
         for npz_file in self.npz_batches[idx]:
             print(npz_file)
             with open(npz_file, 'rb') as f:
                 tmp = np.load(npz_file)
 
-            data.append(tmp['data'])
-            label.append(tmp['label'])
+            data.append(np.squeeze(tmp['data']))
+            label.append(np.squeeze(tmp['label']))
+            filenames.append(npz_file)
 
-        data_batch = np.concatenate(data, axis=1)
-        label_batch = np.concatenate(label, axis=1)
+        # batch size is first axis
+        data_batch = np.stack(data, axis=0)
+        label_batch = np.stack(label, axis=0)
 
         # add meta information
-        meta = {'filename': self.data[idx],
+        meta = {'filename': filenames,
                 'dcrop': {'begin': None, 'end': None},
                 'lcrop': {'begin': None, 'end': None},
                 'weight': 0}
