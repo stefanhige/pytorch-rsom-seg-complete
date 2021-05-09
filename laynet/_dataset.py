@@ -42,7 +42,7 @@ class RsomLayerDataset(Dataset):
                  root_dir,
                  data_str='_rgb.nii.gz',
                  label_str='_l.nii.gz',
-                 batch_size=2,
+                 batch_size=50,
                  sliding_window_size=9,
                  training=True,
                  transform=None):
@@ -93,8 +93,11 @@ class RsomLayerDataset(Dataset):
         self.npz_data_x = self.npz_data_x[torch.randperm(len(self.npz_data_x)).numpy()]
         self.npz_data_y = self.npz_data_y[torch.randperm(len(self.npz_data_y)).numpy()]
 
-        self.npz_batches_x = np.array_split(self.npz_data_x, len(self.npz_data_x) // self.batch_size + 1)
-        self.npz_batches_y = np.array_split(self.npz_data_y, len(self.npz_data_y) // self.batch_size + 1)
+        indices_x = [*range(0, len(self.npz_data_x), self.batch_size)]
+        indices_y = [*range(0, len(self.npz_data_y), self.batch_size)]
+
+        self.npz_batches_x = np.array_split(self.npz_data_x, indices_x[1:])
+        self.npz_batches_y = np.array_split(self.npz_data_y, indices_y[1:])
         map(lambda x: x.tolist(), self.npz_batches_x)
         map(lambda x: x.tolist(), self.npz_batches_y)
 
@@ -197,7 +200,7 @@ class RsomLayerDataset(Dataset):
         label = []
         filenames = []
         for npz_file in self.npz_batches[idx]:
-            print(npz_file)
+            # print(npz_file)
             with open(npz_file, 'rb') as f:
                 tmp = np.load(npz_file)
 
@@ -261,6 +264,273 @@ class RsomLayerDataset(Dataset):
 
         return sample
 
+
+class RandomMirror:
+    """
+    Mirror slices.
+    """
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+        # data still is RGB
+        assert data.shape[3] == 3
+        assert data.shape[1] == 500
+        assert label.shape[1] == 500
+
+        rand_vec = torch.rand(data.shape[0]).numpy()
+
+        for idx in range(len(rand_vec)):
+            if rand_vec[idx] > 0.5:
+                data[idx, ...] = np.flip(data[idx, ...], axis=1)
+                label[idx, ...] = np.flip(label[idx, ...], axis=1)
+
+        return {'data': data, 'label': label, 'meta': meta}
+
+
+class IntensityTransform:
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+        # data still is RGB
+        assert data.shape[3] == 3
+        assert data.shape[1] == 500
+        assert label.shape[1] == 500
+        assert data.dtype == np.uint8
+
+        # intensity transform
+        x_rand = torch.randn(1).item()
+        y_rand = torch.randn(1).item()
+
+        y_max = 255
+        x_max = 255
+
+        # variance
+        x_rand /= 5
+        y_rand /= 5
+
+        # mean
+        x_rand += 0.5
+        y_rand += 0.5
+
+        # clip
+        clip = 0.2
+        x_rand = x_rand if x_rand > clip else clip
+        y_rand = y_rand if y_rand > clip else clip
+
+        x_rand = x_rand if x_rand < 1 - clip else clip
+        y_rand = y_rand if y_rand < 1 - clip else clip
+
+        x_rand *= x_max
+        y_rand *= y_max
+
+        m1 = y_rand / x_rand
+        b1 = y_rand - m1 * x_rand
+
+        m2 = (y_max - y_rand) / (x_max - x_rand)
+        b2 = y_max - m2 * x_max
+
+        data = np.piecewise(data,
+                            [data < x_rand, data >= x_rand],
+                            [lambda x: m1 * x + b1, lambda x: m2 * x + b2]
+                            )
+
+        return {'data': data, 'label': label, 'meta': meta}
+
+
+class Normalize:
+    """
+    normalize
+    """
+    def __init__(self, symmetric=False):
+        self.symmetric = symmetric
+
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+        assert data.dtype == np.uint8
+
+        # data still is RGB
+        assert data.shape[3] == 3
+
+        data = data.astype(np.float32)
+        if self.symmetric:
+            data -= 127.5
+            data /= 127.5
+        else:
+            data /= 255
+
+        return {'data': data, 'label': label, 'meta': meta}
+
+
+class RandomZShift:
+    """Apply random z-shift to sample.
+    Args:
+        max_shift (int, tuple of int):  maximum acceptable
+                                        shift in -z and +z direction (in voxel)
+
+    """
+
+    def __init__(self, max_shift=0):
+        assert isinstance(max_shift, (int, tuple))
+        if isinstance(max_shift, int):
+            self.max_shift = (-max_shift, max_shift)
+        else:
+            assert len(max_shift) == 2
+            assert max_shift[1] > max_shift[0]
+            self.max_shift = max_shift
+
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+
+        # initial shape
+        data_ishape = data.shape
+        label_ishape = label.shape
+
+        # for every slice in batch
+        for idx in range(data.shape[0]):
+
+
+            dz = int(round((self.max_shift[1] - self.max_shift[0]) * torch.rand(1).item() + self.max_shift[0]))
+            assert dz >= self.max_shift[0] and dz <= self.max_shift[1]
+
+            if dz:
+                data_sample = data[idx, ...]
+                label_sample = label[idx, ...]
+
+                shift_data = np.zeros(((abs(dz),) + data_sample.shape[1:]), dtype=np.uint8)
+                shift_label = np.zeros(((abs(dz),) + label_sample.shape[1:]), dtype=np.uint8)
+
+                #print('ZShift:', dz)
+                # positive dz will shift in +z direction, "downwards" inside skin
+                data_sample = np.concatenate((shift_data, data_sample[:-abs(dz), ...]) \
+                                          if dz > 0 else (data_sample[abs(dz):, ...], shift_data), axis=0)
+                label_sample = np.concatenate((shift_label, label_sample[:-abs(dz), ...]) \
+                                           if dz > 0 else (label_sample[abs(dz):, ...], shift_label), axis=0)
+
+                # should be the same...
+                assert (data_ishape == data.shape and label_ishape == label.shape)
+
+                data[idx, ...] = data_sample
+                label[idx, ...] = label_sample
+
+        data = np.ascontiguousarray(data)
+        label = np.ascontiguousarray(label)
+
+        return {'data': data, 'label': label, 'meta': meta}
+
+class ToTensor(object):
+    """Convert ndarrays in sample to Tensors."""
+
+    def __init__(self, shuffle=False):
+        self.shuffle = shuffle
+
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+
+        # torch channel ordering
+        # [ BATCH x CHANNELS x X1 x X2]
+
+        # shape is:
+        # BATCH x 500 x {171,333} x 3
+
+        # drop blue channel
+
+        if data.shape[-1] == 3:
+            data = data[..., :2]
+
+        # move channel axis
+        data = np.moveaxis(data, -1, 1)
+
+        # create singleton channel axis
+        label = np.expand_dims(label, 1)
+
+        data = torch.from_numpy(data)
+        label = torch.from_numpy(label)
+
+        return {'data': data.contiguous(),
+                'label': label.contiguous(),
+                'meta': meta}
+
+
+
+class CropToEven:
+
+    def __init__(self, network_depth=3):
+        # how the unet works, without getting a upscaling error, the input shape must be a multiplier of 2**(network_depth-1)
+        self.maxdiv = 2 ** (network_depth - 1)
+        self.network_depth = network_depth
+
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+
+        assert data.shape[-1] == 3
+
+        # for backward compatibility
+        # easy version: first crop to even, crop rest afterwards, if necessary
+        initial_dshape = data.shape
+        initial_lshape = label.shape
+
+        IsOdd = np.mod(data.shape[:-1], 2)
+
+        # batch dimension is first dimension
+        data = data[:, IsOdd[1]:, IsOdd[2]:, :]
+        label = label[:, IsOdd[1]:, IsOdd[2]:]
+
+        # save, how much data was cropped
+        # using torch tensor, because dataloader will convert anyways
+        # dcrop = data
+        meta['dcrop']['begin'] = torch.from_numpy(np.array([0, IsOdd[1], IsOdd[2], 0], dtype=np.int16))
+        meta['dcrop']['end'] = torch.from_numpy(np.array([0, 0, 0, 0], dtype=np.int16))
+
+        # lcrop = label
+        meta['lcrop']['begin'] = torch.from_numpy(np.array([0, IsOdd[1], IsOdd[2]], dtype=np.int16))
+        meta['lcrop']['end'] = torch.from_numpy(np.array([0, 0, 0], dtype=np.int16))
+
+
+        # check if Z and Y are divisible through self.maxdiv
+        rem1 = np.mod(data.shape[1], self.maxdiv)
+        rem2 = np.mod(data.shape[2], self.maxdiv)
+
+        if rem1 or rem2:
+            if rem1:
+                # crop Z
+                data = data[:, int(np.floor(rem1 / 2)):-int(np.ceil(rem1 / 2)), :, :]
+                label = label[:, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2)), :]
+
+            if rem2:
+                # crop Y
+                data = data[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2)), :]
+                label = label[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2))]
+
+            # add to meta information, how much has been cropped
+            meta['dcrop']['begin'] += torch.from_numpy(
+                np.array([0, np.floor(rem1 / 2), np.floor(rem2 / 2), 0], dtype=np.int16))
+            meta['dcrop']['end'] += torch.from_numpy(
+                np.array([0, np.ceil(rem1 / 2), np.ceil(rem2 / 2), 0], dtype=np.int16))
+
+            meta['lcrop']['begin'] += torch.from_numpy(
+                np.array([0, np.floor(rem1 / 2), np.floor(rem2 / 2)], dtype=np.int16))
+            meta['lcrop']['end'] += torch.from_numpy(
+                np.array([0, np.ceil(rem1 / 2), np.ceil(rem2 / 2)], dtype=np.int16))
+
+        assert np.all(np.array(initial_dshape) == meta['dcrop']['begin'].numpy()
+                      + meta['dcrop']['end'].numpy()
+                      + np.array(data.shape)), \
+            'Shapes and Crop do not match'
+
+        assert np.all(np.array(initial_lshape) == meta['lcrop']['begin'].numpy()
+                      + meta['lcrop']['end'].numpy()
+                      + np.array(label.shape)), \
+            'Shapes and Crop do not match'
+
+        return {'data': data, 'label': label, 'meta': meta}
 
 
 class RSOMLayerDataset(Dataset):
@@ -393,6 +663,8 @@ class RSOMLayerDataset(Dataset):
         return sample
 
 
+
+
 class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
     """
     rsom dataset class for layer segmentation
@@ -456,321 +728,6 @@ class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
         return sample
 
 
-class ToTensor(object):
-    """Convert ndarrays in sample to Tensors."""
-
-    def __init__(self, shuffle=False):
-        self.shuffle = shuffle
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-
-        ################ UPDATE
-        # data can either RGB or RG
-
-        # data is [Z x X x Y x 3] [500 x 171 x 333 x 3]
-        # label is [Z x X x Y] [500 x 171 x 333]
-
-        # we want one sample to be [Z x Y x 3]  2D rgb image
-
-        # numpy array size of images
-        # [H x W x C]
-        # torch tensor size of images
-        # [C x H x W]
-
-        # and for batches
-        # [B x C x H x W]
-
-        # here, X is the batch size.
-        # so we want to reshape to
-        # [X x C x Z x Y] [171 x 3 x 500 x 333]
-        data = data.transpose((1, 3, 0, 2))
-
-        # and for the label
-        # [X x Z x Y] [171 x 500 x 333]
-        label = label.transpose((1, 0, 2))
-
-        if data.shape[0] > 1 and self.shuffle:
-            ds = data.shape
-            ls = label.shape
-            idx = torch.randperm(data.shape[0]).numpy()
-            data = data[idx]
-            label = label[idx]
-            data = np.ascontiguousarray(data)
-            label = np.ascontiguousarray(label)
-            assert ds == data.shape
-            assert ls == label.shape
-
-        data = torch.from_numpy(data)
-        label = torch.from_numpy(label)
-
-        return {'data': data.contiguous(),
-                'label': label.contiguous(),
-                'meta': meta}
-
-
-class RandomZShift(object):
-    """Apply random z-shift to sample.
-
-    Args:
-        max_shift (int, tuple of int):  maximum acceptable 
-                                        shift in -z and +z direction (in voxel)
-        
-    """
-
-    def __init__(self, max_shift=0):
-        assert isinstance(max_shift, (int, tuple))
-        if isinstance(max_shift, int):
-            self.max_shift = (-max_shift, max_shift)
-        else:
-            assert len(max_shift) == 2
-            assert max_shift[1] > max_shift[0]
-            self.max_shift = max_shift
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, np.ndarray)
-        assert isinstance(label, np.ndarray)
-
-        # initial shape
-        data_ishape = data.shape
-        label_ishape = label.shape
-
-        # generate random dz offset
-        dz = int(round((self.max_shift[1] - self.max_shift[0]) * torch.rand(1).item() + self.max_shift[0]))
-        assert (dz >= self.max_shift[0] and dz <= self.max_shift[1])
-
-        if dz:
-            shift_data = np.zeros(((abs(dz),) + data.shape[1:]), dtype=np.uint8)
-            shift_label = np.zeros(((abs(dz),) + label.shape[1:]), dtype=np.uint8)
-
-            # print('RandomZShift: Check if this array modification does the correct thing before actually using it')
-            # print('ZShift:', dz)
-            # positive dz will shift in +z direction, "downwards" inside skin
-            data = np.concatenate((shift_data, data[:-abs(dz), :, :, :]) \
-                                      if dz > 0 else (data[abs(dz):, :, :, :], shift_data), axis=0)
-            label = np.concatenate((shift_label, label[:-abs(dz), :, :]) \
-                                       if dz > 0 else (label[abs(dz):, :, :], shift_label), axis=0)
-
-            # data = np.concatenate((data[:-abs(dz),:,:,:], shift_data)\
-            #         if dz > 0 else (shift_data, data[abs(dz):,:,:,:]), axis = 0)
-            # label = np.concatenate((label[:-abs(dz),:,:], shift_label)\
-            #         if dz > 0 else (shift_label, label[abs(dz):,:,:]), axis = 0)
-
-            # should be the same...
-            assert (data_ishape == data.shape and label_ishape == label.shape)
-            data = np.ascontiguousarray(data)
-            label = np.ascontiguousarray(label)
-        return {'data': data, 'label': label, 'meta': meta}
-
-
-class ZeroCenter(object):
-    """ 
-    Zero center input volumes
-    """
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, np.ndarray)
-        assert isinstance(label, np.ndarray)
-        # data still is RGB
-        assert data.shape[3] == 3
-
-        # compute for all x,y,z mean for every color channel
-        # rgb_mean = np.around(np.mean(data, axis=(0, 1, 2))).astype(np.int16)
-        # meanvec = np.tile(rgb_mean, (data.shape[:-1] + (1,)))
-
-        # how to zero center??
-        # data -= 127
-
-        return {'data': data, 'label': label, 'meta': meta}
-
-
-class DropBlue(object):
-    """
-    Drop the last slice of the RGB dimension
-    RSOM images are 2channel, so blue is empty anyways.
-    """
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, np.ndarray)
-        assert isinstance(label, np.ndarray)
-        # data still is RGB
-        assert data.shape[3] == 3
-
-        data = data[:, :, :, :2]
-
-        assert data.shape[3] == 2
-
-        return {'data': data, 'label': label, 'meta': meta}
-
-
-class SwapDim(object):
-    """
-    swap x and y dimension to train network for the other view
-    """
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, np.ndarray)
-        assert isinstance(label, np.ndarray)
-        # data still is RGB
-        assert data.shape[3] == 3
-
-        # data is [Z x X x Y x 3] [500 x 171 x 333 x 3]
-        # label is [Z x X x Y] [500 x 171 x 333]
-
-        data = np.swapaxes(data, 1, 2)
-        label = np.swapaxes(label, 1, 2)
-
-        return {'data': data, 'label': label, 'meta': meta}
-
-
-class precalcLossWeight(object):
-    """
-    precalculation of a weight matrix used in the cross entropy
-    loss function. It will be precalculated with the dataloader,
-    so it can be computed in parallel
-    call only after ToTensor!!
-    """
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, torch.Tensor)
-        assert isinstance(label, torch.Tensor)
-
-        # weight is meta['weight']
-
-        # TODO: calculation
-        target = label
-
-        # LOSS shape [Minibatch, Z, X]
-        target_shp = target.shape
-        weight = copy.deepcopy(target)
-
-        # loop over dim 0 and 2
-        for yy in np.arange(target_shp[0]):
-            for xx in np.arange(target_shp[2]):
-                idx_nz = torch.nonzero(target[yy, :, xx])
-                idx_beg = idx_nz[0].item()
-
-                idx_end = idx_nz[-1].item()
-                # weight[yy,:idx_beg,xx] = np.flip(scalingfn(idx_beg))
-                # print(idx_beg, idx_end)
-
-                A = self.scalingfn(idx_beg)
-                B = self.scalingfn(target_shp[1] - idx_end)
-
-                weight[yy, :idx_beg, xx] = A.unsqueeze(0).flip(1).squeeze()
-                # print('A reversed', A.unsqueeze(0).flip(1).squeeze())
-                # print('A', A)
-
-                weight[yy, idx_end:, xx] = B
-                # weight[yy,:idx_beg,xx] = np.flip(scalingfn(idx_beg))
-                # weight[yy,idx_end:,xx] = scalingfn(label_shp[1] - idx_end)
-
-        meta['weight'] = weight.float()
-
-        return {'data': data, 'label': label, 'meta': meta}
-
-    @staticmethod
-    def scalingfn(l):
-        '''
-        l is length
-        '''
-        # linear, starting at 1
-        y = torch.arange(l) + 1
-        return y
-
-
-class CropToEven(object):
-    """ 
-    if Volume shape is not even numbers, simply crop the first element
-    except for last dimension, this is RGB  = 3
-    """
-
-    def __init__(self, network_depth=3):
-        # how the unet works, without getting a upscaling error, the input shape must be a multiplier of 2**(network_depth-1)
-        self.maxdiv = 2 ** (network_depth - 1)
-        self.network_depth = network_depth
-
-    def __call__(self, sample):
-        data, label, meta = sample['data'], sample['label'], sample['meta']
-        assert isinstance(data, np.ndarray)
-        assert isinstance(label, np.ndarray)
-
-        # for backward compatibility
-        # easy version: first crop to even, crop rest afterwards, if necessary
-        initial_dshape = data.shape
-        initial_lshape = label.shape
-
-        IsOdd = np.mod(data.shape[:-1], 2)
-
-        # hack, don't need to crop along what will be batch dimension later on
-        IsOdd[1] = 0
-
-        data = data[IsOdd[0]:, IsOdd[1]:, IsOdd[2]:, :]
-        label = label[IsOdd[0]:, IsOdd[1]:, IsOdd[2]:]
-
-        if not isinstance(meta['weight'], int):
-            raise NotImplementedError('Weight was calulated before. Cropping implementation missing')
-
-        # save, how much data was cropped
-        # using torch tensor, because dataloader will convert anyways
-        # dcrop = data
-        meta['dcrop']['begin'] = torch.from_numpy(np.array([IsOdd[0], IsOdd[1], IsOdd[2], 0], dtype=np.int16))
-        meta['dcrop']['end'] = torch.from_numpy(np.array([0, 0, 0, 0], dtype=np.int16))
-
-        # lcrop = label
-        meta['lcrop']['begin'] = torch.from_numpy(np.array([IsOdd[0], IsOdd[1], IsOdd[2]], dtype=np.int16))
-        meta['lcrop']['end'] = torch.from_numpy(np.array([0, 0, 0], dtype=np.int16))
-
-        # before cropping
-        #            [Z  x Batch x Y  x 3]
-        # data shape [500 x 171 x 333 x 3]
-        # after cropping
-        # data shape [500 x 170 x 332 x 3]
-
-        # need to crop Z and Y
-
-        # check if Z and Y are divisible through self.maxdiv
-        rem0 = np.mod(data.shape[0], self.maxdiv)
-        rem2 = np.mod(data.shape[2], self.maxdiv)
-
-        if rem0 or rem2:
-            if rem0:
-                # crop Z
-                data = data[int(np.floor(rem0 / 2)):-int(np.ceil(rem0 / 2)), :, :, :]
-                label = label[int(np.floor(rem0 / 2)):-int(np.ceil(rem0 / 2)), :, :]
-
-            if rem2:
-                # crop Y
-                data = data[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2)), :]
-                label = label[:, :, int(np.floor(rem2 / 2)):-int(np.ceil(rem2 / 2))]
-
-            # add to meta information, how much has been cropped
-            meta['dcrop']['begin'] += torch.from_numpy(
-                np.array([np.floor(rem0 / 2), 0, np.floor(rem2 / 2), 0], dtype=np.int16))
-            meta['dcrop']['end'] += torch.from_numpy(
-                np.array([np.ceil(rem0 / 2), 0, np.ceil(rem2 / 2), 0], dtype=np.int16))
-
-            meta['lcrop']['begin'] += torch.from_numpy(
-                np.array([np.floor(rem0 / 2), 0, np.floor(rem2 / 2)], dtype=np.int16))
-            meta['lcrop']['end'] += torch.from_numpy(
-                np.array([np.ceil(rem0 / 2), 0, np.ceil(rem2 / 2)], dtype=np.int16))
-
-        assert np.all(np.array(initial_dshape) == meta['dcrop']['begin'].numpy()
-                      + meta['dcrop']['end'].numpy()
-                      + np.array(data.shape)), \
-            'Shapes and Crop do not match'
-
-        assert np.all(np.array(initial_lshape) == meta['lcrop']['begin'].numpy()
-                      + meta['lcrop']['end'].numpy()
-                      + np.array(label.shape)), \
-            'Shapes and Crop do not match'
-
-        return {'data': data, 'label': label, 'meta': meta}
 
 
 def to_numpy(V, meta):
@@ -823,6 +780,21 @@ def to_numpy(V, meta):
     return V
 
 
+def show(element, idx=0):
+    import matplotlib.pyplot as plt
+    data = element['data']
+
+    plt.figure()
+    plt.imshow(data[idx, ...])
+
+
 if __name__ == '__main__':
-    dataset = RsomLayerDataset(root_dir='/home/stefan/Documents/RSOM/Examples20210505/one_file')
+    dataset = RsomLayerDataset(root_dir='/home/stefan/Documents/RSOM/Examples20210505/one_file',
+                               training=True)
     el = dataset[0]
+
+    show(el)
+    import copy
+    elm = RandomZShift(max_shift=30)(copy.deepcopy(el))
+
+    show(elm)
