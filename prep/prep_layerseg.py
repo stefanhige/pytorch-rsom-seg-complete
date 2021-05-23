@@ -21,13 +21,13 @@ from utils.get_unique_filepath import get_unique_filepath
 
 # define folder
 #origin = '/home/stefan/Documents/RSOM/Diabetes/new_data/no_surf'
-origin = '/home/stefan/Documents/RSOM/Diabetes/miccai/epidermis-relabel/mat'
+origin = '/home/stefan/RSOM/testing/mat'
 # origin = '/media/nas_ads_mwn/AG-Ntziachristos/RSOM_Data/RSOM_Diabetes/Stefan/allmat'
 # origin = '/media/nas_ads_mwn/AG-Ntziachristos/RSOM_Data/RSOM_Diabetes/Stefan/'
 
 # destination = '/media/nas_ads_mwn/AG-Ntziachristos/RSOM_Data/RSOM_Diabetes/Stefan/'
 # destination = '/home/sgerl/Documents/PYTHON/TestDataset20190411/selection/other_preproccessing_tests/sliding_mip_6'
-destination = '/home/stefan/Documents/RSOM/Diabetes/miccai/epidermis-relabel/rgb'
+destination = '/home/stefan/RSOM/testing/mat/out'
 
 
 # mode

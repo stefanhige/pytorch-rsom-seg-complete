@@ -42,7 +42,7 @@ class RsomLayerDataset(Dataset):
                  root_dir,
                  data_str='_rgb.nii.gz',
                  label_str='_l.nii.gz',
-                 batch_size=50,
+                 batch_size=2,
                  sliding_window_size=9,
                  training=True,
                  transform=None):
@@ -52,11 +52,13 @@ class RsomLayerDataset(Dataset):
         assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
             'root_dir not a valid directory'
 
-        self.batch_size = batch_size
         self.root_dir = root_dir
         self.transform = transform
         self.training = training
         self.sliding_window_size = sliding_window_size
+
+        if self.training:
+            self.batch_size = batch_size
 
         # for debug
         self.write_png = False
@@ -234,7 +236,11 @@ class RsomLayerDataset(Dataset):
 
 
     def __len__(self):
-        pass
+        if self.training:
+            return len(self.npz_batches)
+        else:
+            return len(self.data)
+
 
     def _getitem_train(self, idx):
         data = []
@@ -868,27 +874,25 @@ if __name__ == '__main__':
 
     el_train = dataset_train[0]
 
-    self.train_dataloader = DataLoader(self.train_dataset,
-                                       batch_size=self.train_batch_size,
-                                       shuffle=True,
-                                       drop_last=False,
-                                       num_workers=4,
-                                       pin_memory=True)
+    train_dataloader = DataLoader(dataset_train, batch_size=1, shuffle=True, drop_last=False, num_workers=4, pin_memory=True)
+    for sample in train_dataloader:
+        print(sample['data'].shape)
 
-    RsomLayerDataset.save_nii(el_train, './')
+
+    #RsomLayerDataset.save_nii(el_train, './')
 
     #el_numpy = to_numpy(el_train['label'], el_train['meta'])
+    if 0:
+        dataset_test = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile',
+                                        training=False,
+                                        transform=transforms.Compose([
+                                            CropToEven(network_depth=5),
+                                            IntensityTransform(),
+                                            ToTensor()])
+                                        )
 
-    dataset_test = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile',
-                                    training=False,
-                                    transform=transforms.Compose([
-                                        CropToEven(network_depth=5),
-                                        IntensityTransform(),
-                                        ToTensor()])
-                                    )
+        el_test = dataset_test[0]
 
-    el_test = dataset_test[0]
-
-    RsomLayerDataset.save_nii(el_test, './')
+        RsomLayerDataset.save_nii(el_test, './')
 
 

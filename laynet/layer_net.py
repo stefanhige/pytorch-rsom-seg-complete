@@ -7,6 +7,8 @@ import json
 import warnings
 from timeit import default_timer as timer
 
+from types import SimpleNamespace
+
 from datetime import date
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -17,12 +19,12 @@ from scipy import ndimage
 
 from ._model import UNet, Fcn
 import laynet._metrics as lfs #lfs=lossfunctions
-from ._dataset import RSOMLayerDataset, RSOMLayerDatasetUnlabeled, \
-                      RandomZShift, CropToEven, \
+from ._dataset import RsomLayerDataset, \
+                      RandomZShift, CropToEven, RandomMirror, IntensityTransform, \
                       ToTensor, to_numpy
 from utils import save_nii
 
-class LayerNetBase():
+class LayerNetBase:
     """
     stripped base class for predicting RSOM layers.
     for training user class LayerNet
@@ -31,7 +33,7 @@ class LayerNetBase():
         dirs               dict of string      use these directories
         filename           string              pattern to save output
     """
-    def __init__(self, 
+    def __init__(self,
                  dirs={'train':'', 'eval':'', 'pred':'', 'model':'', 'out':''},
                  device=torch.device('cuda'),
                  model_depth=4,
@@ -44,27 +46,25 @@ class LayerNetBase():
         self.out_pred_dir = dirs['out']
         self.probability = probability
 
-        self.pred_dataset = RSOMLayerDatasetUnlabeled(
-                dirs['pred'],
-                transform=transforms.Compose([
-                    ZeroCenter(), 
-                    CropToEven(network_depth=self.model_depth),
-                    DropBlue(),
-                    ToTensor()])
-                )
 
-        self.pred_dataloader = DataLoader(
-            self.pred_dataset,
-            batch_size=1, 
-            shuffle=False, 
-            num_workers=4, 
-            pin_memory=True)
+        self.pred_dataset = RsomLayerDataset(self.dirs['pred'],
+                                             training=False,
+                                             transform=transforms.Compose([
+                                                 CropToEven(network_depth=self.model_depth),
+                                                 ToTensor()])
+                                             )
+
+        self.pred_dataloader = DataLoader(self.pred_dataset,
+                                          batch_size=1,
+                                          shuffle=False,
+                                          num_workers=4,
+                                          pin_memory=True)
 
 
         self.size_pred = len(self.pred_dataset)
         self.device = device
         self.dtype = torch.float32
-        
+
         if model_type == 'unet':
             self.model = UNet(in_channels=2,
                             n_classes=1,
@@ -78,13 +78,16 @@ class LayerNetBase():
             self.model = Fcn()
         else:
             raise NotImplementedError
+
         self.model = self.model.to(self.device)
-        
+
         self.minibatch_size = 1 if model_type == 'unet' else 9
-        
+
         if self.dirs['model']:
             self.model.load_state_dict(torch.load(self.dirs['model']))
-        
+        else:
+            raise Exception("No model!")
+
     def printandlog(self, *msg):
         if 1:
             print(*msg)
@@ -92,6 +95,7 @@ class LayerNetBase():
                 print(*msg, file=self.logfile)
             except:
                 pass
+
     def calc_metrics(self, ground_truth, label):
         print(ground_truth.shape)
         prec = []
@@ -105,20 +109,20 @@ class LayerNetBase():
 
     def predict(self):
         self.model.eval()
-        iterator = iter(self.pred_dataloader) 
+        iterator = iter(self.pred_dataloader)
 
         for i in range(self.size_pred):
-            # get the next volume to evaluate 
+            # get the next volume to evaluate
             batch = next(iterator)
-            
+
             m = batch['meta']
-            
+
             batch['data'] = batch['data'].to(
                     self.device,
                     self.dtype,
                     non_blocking=True
                     )
-            
+
             # divide into minibatches
             minibatches = np.arange(batch['data'].shape[1],
                                     step=self.minibatch_size)
@@ -136,44 +140,44 @@ class LayerNetBase():
                     data = batch['data'][:, idx:idx+self.minibatch_size, :, :]
                 else:
                     data = batch['data'][:, idx:, :, :]
-     
+
                 data = torch.squeeze(data, dim=0)
 
                 prediction = self.model(data)
 
-                prediction = prediction.detach() 
-                prediction_stack = torch.cat((prediction_stack, prediction), dim=0) 
-            
+                prediction = prediction.detach()
+                prediction_stack = torch.cat((prediction_stack, prediction), dim=0)
+
             prediction_stack = prediction_stack.to('cpu')
-            
-            
+
+
             # transform -> labels
             prediction_stack = torch.sigmoid(prediction_stack)
 
             label = prediction_stack >= self.probability
 
             m = batch['meta']
-            
+
             label = label.squeeze()
             label = to_numpy(label, m)
 
             filename = batch['meta']['filename'][0]
             filename = filename.replace('rgb.nii.gz','')
-            
+
             if 0:
                 label = self.smooth_pred(label, filename)
 
             print('Saving', filename)
             save_nii(label.astype(np.uint8), self.out_pred_dir, filename + 'pred')
-            
+
             if 1:
                 save_nii(to_numpy(prediction_stack.squeeze(), m),
-                        self.out_pred_dir, 
+                        self.out_pred_dir,
                         filename + 'ppred')
             # compare to ground truth
             if 0:
                 label_gt = batch['label']
-          
+
                 label_gt = torch.squeeze(label_gt, dim=0)
                 label_gt = to_numpy(label_gt, m)
 
@@ -184,22 +188,22 @@ class LayerNetBase():
 
     def predict_calc(self):
         self.model.eval()
-        iterator = iter(self.pred_dataloader) 
+        iterator = iter(self.pred_dataloader)
         prec = []
         recall = []
         dice = []
         for i in range(self.size_pred):
-            # get the next volume to evaluate 
+            # get the next volume to evaluate
             batch = next(iterator)
-            
+
             m = batch['meta']
-            
+
             batch['data'] = batch['data'].to(
                     self.device,
                     self.dtype,
                     non_blocking=True
                     )
-            
+
             # divide into minibatches
             minibatches = np.arange(batch['data'].shape[1],
                                     step=self.minibatch_size)
@@ -217,27 +221,27 @@ class LayerNetBase():
                     data = batch['data'][:, idx:idx+self.minibatch_size, :, :]
                 else:
                     data = batch['data'][:, idx:, :, :]
-     
+
                 data = torch.squeeze(data, dim=0)
 
                 prediction = self.model(data)
 
-                prediction = prediction.detach() 
-                prediction_stack = torch.cat((prediction_stack, prediction), dim=0) 
-            
+                prediction = prediction.detach()
+                prediction_stack = torch.cat((prediction_stack, prediction), dim=0)
+
             prediction_stack = prediction_stack.to('cpu')
-            
-            
+
+
             # transform -> labels
             prediction_stack = torch.sigmoid(prediction_stack)
 
             label = prediction_stack >= self.probability
 
             m = batch['meta']
-            
+
             label = label.squeeze()
             label = to_numpy(label, m)
-            
+
             print('in pred: max label', batch['label'].max())
             ground_truth = batch['label']
             print('gt shape', ground_truth.shape)
@@ -259,15 +263,15 @@ class LayerNetBase():
             print('Saving', filename)
             if 1:
                 save_nii(label.astype(np.uint8), self.out_pred_dir, filename + 'pred')
-            
+
             if 1:
                 save_nii(to_numpy(prediction_stack.squeeze(), m),
-                        self.out_pred_dir, 
+                        self.out_pred_dir,
                         filename + 'ppred')
             # compare to ground truth
             if 0:
                 label_gt = batch['label']
-          
+
                 label_gt = torch.squeeze(label_gt, dim=0)
                 label_gt = to_numpy(label_gt, m)
 
@@ -275,7 +279,7 @@ class LayerNetBase():
                 label_diff += 2*(label < label_gt).astype(np.uint8)
                 # label_diff = label != label_gt
                 save_nii(label_diff, self.out_pred_dir, filename + 'dpred')
-        
+
         self.printandlog('Metrics:')
         self.printandlog('Precision: mean {:.5f} std {:.5f}'.format(np.nanmean(prec), np.nanstd(prec)))
         self.printandlog('Recall:    mean {:.5f} std {:.5f}'.format(np.nanmean(recall), np.nanstd(recall)))
@@ -285,7 +289,7 @@ class LayerNetBase():
         '''
         smooth the prediction
         '''
-        
+
         # 1. fill holes inside the label
         ldtype = label.dtype
         label = ndimage.binary_fill_holes(label).astype(ldtype)
@@ -294,14 +298,14 @@ class LayerNetBase():
         label = ndimage.binary_closing(label, iterations=2)
         label = label[2:-2,2:-2,2:-2]
         assert label_shape == label.shape
-        
+
         # 2. scan along z-dimension change in label 0->1 1->0
         #    if there's more than one transition each, one needs to be dropped
         #    after filling holes, we hope to be able to drop the outer one
         # 3. get 2x 2-D surface data with surface height being the index in z-direction
-        
+
         surf_lo = np.zeros((label_shape[1], label_shape[2]))
-        
+
         # set highest value possible (500) as default. Therefore, empty sections
         # of surf_up and surf_lo will get smoothened towards each other, and during
         # reconstructions, we won't have any weird shapes.
@@ -310,18 +314,18 @@ class LayerNetBase():
         for xx in np.arange(label_shape[1]):
             for yy in np.arange(label_shape[2]):
                 nz = np.nonzero(label[:,xx,yy])
-                
+
                 if nz[0].size != 0:
                     idx_up = nz[0][0]
                     idx_lo = nz[0][-1]
                     surf_up[xx,yy] = idx_up
                     surf_lo[xx,yy] = idx_lo
-       
+
         #    smooth coarse structure, eg with a 25x25 average and crop everything which is above average*factor
         #           -> hopefully spikes will be removed.
         surf_up_m = ndimage.median_filter(surf_up, size=(26, 26), mode='nearest')
         surf_lo_m = ndimage.median_filter(surf_lo, size=(26, 26), mode='nearest')
-        
+
         for xx in np.arange(label_shape[1]):
             for yy in np.arange(label_shape[2]):
                 if surf_up[xx,yy] < surf_up_m[xx,yy]:
@@ -339,13 +343,13 @@ class LayerNetBase():
         for xx in np.arange(label_shape[1]):
             for yy in np.arange(label_shape[2]):
 
-                label_rec[int(np.round(surf_up[xx,yy])):int(np.round(surf_lo[xx,yy])),xx,yy] = 1     
+                label_rec[int(np.round(surf_up[xx,yy])):int(np.round(surf_lo[xx,yy])),xx,yy] = 1
 
         return label_rec
 
 
 class LayerNet(LayerNetBase):
-    '''
+    """
     class for setting up, training and evaluating of layer segmentation
     with unet on RSOM dataset
     Args:
@@ -359,8 +363,9 @@ class LayerNet(LayerNetBase):
         scheduler_patience int                 n epochs before lr reduction
         lossfn             function            custom lossfunction
         class_weight       (float, float)      class weight for classes (0, 1)
-        epochs             int                 number of epochs 
-    '''
+        epochs             int                 number of epochs
+    """
+
     def __init__(self,
                  device=torch.device('cuda'),
                  sdesc='',
@@ -380,16 +385,8 @@ class LayerNet(LayerNetBase):
                  dropout = False,
                  DEBUG = False,
                  probability=0.5,
-                 slice_wise=False
                  ):
-        self.slice_wise = slice_wise
-        if not slice_wise:
-            self.eval_batch_size = 1
-            self.train_batch_size = 1
-        else:
-            self.eval_batch_size = 5
-            self.train_batch_size = 5
-        
+
         self.sdesc = sdesc 
 
         self.DEBUG = DEBUG
@@ -431,6 +428,7 @@ class LayerNet(LayerNetBase):
             if not self.DEBUG:
                 self.out_pred_dir = os.path.join(self.dirs['out'],'prediction')
                 os.mkdir(self.out_pred_dir)
+
         # MODEL
         if model_type == 'unet':
             self.model = UNet(in_channels=2,
@@ -469,92 +467,27 @@ class LayerNet(LayerNetBase):
         
         # DATASET
         self.train_dataset_zshift = dataset_zshift
-        
-        self.train_dataset = RSOMLayerDataset(self.dirs['train'],
-            slice_wise=self.slice_wise,
-            transform=transforms.Compose([RandomZShift(dataset_zshift),
-                                          ZeroCenter(),
-                                          CropToEven(network_depth=self.model_depth),
-                                          DropBlue(),
-                                          ToTensor(shuffle=True),
-                                          precalcLossWeight()
-                                          ]))
-        
-        self.train_dataloader = DataLoader(self.train_dataset,
-                                           batch_size=self.train_batch_size, 
-                                           shuffle=True, 
-                                           drop_last=False,
-                                           num_workers=4, 
-                                           pin_memory=True)
+        self._setup_dataloaders()
 
-
-
-        
-        self.eval_dataset = RSOMLayerDataset(self.dirs['eval'],
-            slice_wise=self.slice_wise,
-            transform=transforms.Compose([RandomZShift(),
-                                          ZeroCenter(),
-                                          CropToEven(network_depth=self.model_depth),
-                                          DropBlue(),
-                                          ToTensor(),
-                                          precalcLossWeight()]))
-        self.eval_dataloader = DataLoader(self.eval_dataset,
-                                          batch_size=self.eval_batch_size, 
-                                          shuffle=False,
-                                          drop_last=False,
-                                          num_workers=4, 
-                                          pin_memory=True)
-        if dirs['pred']: 
-            self.pred_dataset = RSOMLayerDataset(
-                    dirs['pred'],
-                    transform=transforms.Compose([
-                        ZeroCenter(), 
-                        CropToEven(network_depth=self.model_depth),
-                        DropBlue(),
-                        ToTensor()])
-                    )
-
-            self.pred_dataloader = DataLoader(self.pred_dataset,
-                                             batch_size=1, 
-                                             shuffle=False, 
-                                             num_workers=4, 
-                                             pin_memory=True)
-
-        self.probability = probability 
-        
         # OPTIMIZER
         self.initial_lr = initial_lr
-        if optimizer == 'Adam':
-            self.optimizer = torch.optim.Adam(
-                    self.model.parameters(),
-                    lr=self.initial_lr,
-                    weight_decay = 0
-                    )
-        
-        # SCHEDULER
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, 
-                mode='min', 
-                factor=0.1,
-                patience=scheduler_patience,
-                verbose=True,
-                threshold=1e-4,
-                threshold_mode='rel',
-                cooldown=0,
-                min_lr=0,
-                eps=1e-8)
-        
+        self._setup_optimizer(optimizer=optimizer, scheduler_patience=scheduler_patience)
+
+        self.probability = probability
+        self.train_batch_size = self.train_dataset.batch_size
+
+
         # HISTORY
         self.history = {
-                'train':{'epoch': [], 'loss': []},
-                'eval':{'epoch': [], 'loss': []}
+                'train': {'epoch': [], 'loss': [], 'unred_loss': []},
+                'eval': {'epoch': [], 'loss': [], 'unred_loss': []}
                 }
-        
+
         # CURRENT EPOCH
         self.curr_epoch = None
         
         # ADDITIONAL ARGS
-        self.args = self.helperClass()
+        self.args = SimpleNamespace()
         
         self.size_pred = len(self.pred_dataset)
         self.args.size_train = len(self.train_dataset)
@@ -567,11 +500,83 @@ class LayerNet(LayerNetBase):
         self.dtype = self.args.dtype
         self.args.non_blocking = True
         self.args.n_epochs = epochs
-        self.args.data_dim = self.eval_dataset[0]['data'].shape
+
+        # TODO fix this
+        self.args.data_dim = self.eval_dataset[0][0]['data'].shape
+
+    def _setup_dataloaders(self):
+
+        self.train_dataset = RsomLayerDataset(self.dirs['train'],
+                                              training=True,
+                                              transform=transforms.Compose([
+                                                  RandomZShift(max_shift=self.train_dataset_zshift),
+                                                  RandomMirror(),
+                                                  CropToEven(network_depth=self.model_depth),
+                                                  IntensityTransform(),
+                                                  ToTensor()])
+                                              )
+
+        self.train_dataloader = DataLoader(self.train_dataset,
+                                           batch_size=1,
+                                           shuffle=True,
+                                           drop_last=False,
+                                           num_workers=4,
+                                           pin_memory=True)
+
+        self.eval_dataset = RsomLayerDataset(self.dirs['eval'],
+                                             training=False,
+                                             transform=transforms.Compose([
+                                                 CropToEven(network_depth=self.model_depth),
+                                                 ToTensor()])
+                                             )
+
+        self.eval_dataloader = DataLoader(self.eval_dataset,
+                                          batch_size=1,
+                                          shuffle=False,
+                                          drop_last=False,
+                                          num_workers=4,
+                                          pin_memory=True)
+
+        if self.dirs['pred']:
+            self.pred_dataset = RsomLayerDataset(self.dirs['eval'],
+                                                 training=False,
+                                                 transform=transforms.Compose([
+                                                     CropToEven(network_depth=self.model_depth),
+                                                     ToTensor()])
+                                                 )
+
+            self.pred_dataloader = DataLoader(self.pred_dataset,
+                                              batch_size=1,
+                                              shuffle=False,
+                                              num_workers=4,
+                                              pin_memory=True)
+
+    def _setup_optimizer(self, *, optimizer, scheduler_patience):
+        if optimizer == 'Adam':
+            self.optimizer = torch.optim.Adam(
+                self.model.parameters(),
+                lr=self.initial_lr,
+                weight_decay = 0)
+        else:
+            raise NotImplementedError
+
+        # SCHEDULER
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.1,
+                patience=scheduler_patience,
+                verbose=True,
+                threshold=1e-4,
+                threshold_mode='rel',
+                cooldown=0,
+                min_lr=0,
+                eps=1e-8)
        
     def debug(self, *msg):
         if self.DEBUG:
             print(*msg)
+
     def printConfiguration(self, destination='stdout'):
         if destination == 'stdout':
             where = sys.stdout
@@ -641,11 +646,9 @@ class LayerNet(LayerNetBase):
             # extract the average training loss of the epoch
             le_idx = self.history['train']['epoch'].index(curr_epoch)
             le_losses = self.history['train']['loss'][le_idx:]
-            # divide by batch size (170) times dataset size
-            if not self.slice_wise:
-                train_loss = sum(le_losses) / (self.args.data_dim[0]*self.args.size_train)
-            else:
-                train_loss = sum(le_losses) / (self.args.size_train)
+
+            print("sum sizes train", (len(self.train_dataset) * self.train_dataset.batch_size))
+            train_loss = sum(le_losses)  / (len(self.train_dataset) * self.train_dataset.batch_size)
             # extract most recent eval loss
             curr_loss = self.history['eval']['loss'][-1]
             
@@ -673,8 +676,7 @@ class LayerNet(LayerNetBase):
     
     def train(self, iterator, epoch):
         self.model.train()
-        
-        for i in range(int(np.ceil(self.args.size_train/self.train_batch_size))):
+        for i in range(len(self.train_dataset)):
             # get the next batch of training data
             try:
                 batch = next(iterator)
@@ -682,210 +684,99 @@ class LayerNet(LayerNetBase):
                 print('Iterators wrong')
                 break
                     
-            batch['label'] = batch['label'].to(
+            label = batch['label'].to(
                     self.args.device, 
                     dtype=self.args.dtype, 
                     non_blocking=self.args.non_blocking)
-            batch['data'] = batch['data'].to(
-                    self.args.device,
-                    self.args.dtype,
-                    non_blocking=self.args.non_blocking)
-            batch['meta']['weight'] = batch['meta']['weight'].to(
+            data = batch['data'].to(
                     self.args.device,
                     self.args.dtype,
                     non_blocking=self.args.non_blocking)
 
-            if not self.slice_wise:
-                # divide into minibatches
-                minibatches = np.arange(batch['data'].shape[1],
-                        step=self.args.minibatch_size)
-                for i2, idx in enumerate(minibatches): 
-                    if idx + self.args.minibatch_size < batch['data'].shape[1]:
-                        data = batch['data'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                        label = batch['label'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                        weight = batch['meta']['weight'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                    else:
-                        data = batch['data'][:, idx:, :, :]
-                        label = batch['label'][:, idx:, :, :]
-                        weight = batch['meta']['weight'][:, idx:, :, :]
-                    
-                    data = torch.squeeze(data, dim=0)
-                    label = torch.squeeze(label, dim=0)
-                    weight = torch.squeeze(weight, dim=0)
-                    
-                    label = torch.unsqueeze(label, dim=1)
-                    weight = torch.unsqueeze(weight, dim=1)
-                    
-                    prediction = self.model(data)
-                
-                    # move back to save memory
-                    # prediction = prediction.to('cpu')
-                    loss = self.lossfn(
-                            pred=prediction, 
-                            target=label,
-                            spatial_weight=weight,
-                            class_weight=self.class_weight,
-                            smoothness_weight=self.lossfn_smoothness,
-                            window=self.lossfn_window,
-                            spatial_weight_scale=self.lossfn_spatial_weight_scale)
-                    
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
-            
-                    frac_epoch = epoch +\
-                            i/self.args.size_train +\
-                            i2/(self.args.size_train * minibatches.size)
-                    
-                    self.history['train']['epoch'].append(frac_epoch)
-                    self.history['train']['loss'].append(loss.data.item())
-                
-            else:
-                
-                data = batch['data']
-                label = batch['label']
-                weight = batch['meta']['weight']
+            label = torch.squeeze(label, dim=0)
+            data = torch.squeeze(data, dim=0)
 
-                data = torch.squeeze(data, dim=1)
-                
-                # self.debug('DATA shape', data.shape)
-                # self.debug('LABEL shape', label.shape)
-                
-                prediction = self.model(data)
-            
-                loss = self.lossfn(
-                        pred=prediction, 
-                        target=label,
-                        spatial_weight=weight,
-                        class_weight=self.class_weight,
-                        smoothness_weight=self.lossfn_smoothness,
-                        window=self.lossfn_window,
-                        spatial_weight_scale=self.lossfn_spatial_weight_scale)
-                
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                current_loss = loss.data.item()
-        
-                frac_epoch = epoch + i/int(np.ceil(self.args.size_train/self.train_batch_size))
-                self.debug('train', i,'current loss', current_loss, 'batch', data.shape[0]) 
-                self.history['train']['epoch'].append(frac_epoch)
-                self.history['train']['loss'].append(current_loss)
+            #print(f"{data.shape=}")
+
+            prediction = self.model(data)
+
+            #print(f"{prediction.shape=}")
+
+            # move back to save memory
+            # prediction = prediction.to('cpu')
+            loss = self.lossfn(input=prediction, target=label)
+                    
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            frac_epoch = epoch + i / len(self.train_dataset)
+
+            self.history['train']['epoch'].append(frac_epoch)
+            self.history['train']['loss'].append(loss.data.item())
+            del loss
 
     def eval(self, iterator, epoch):
-        '''
-        '''
-        # PARSE
-        # model = self.model
-        # history = self.history
-        # lossfn = self.lossfn
-        # args = self.args
-        
-        
         self.model.eval()
         running_loss = 0.0
+        sizes = 0
         
-        for i in range(int(np.ceil(self.args.size_train/self.eval_batch_size))):
-            # get the next batch of the testset
+        for i in range(len(self.eval_dataset)):
+            # get the next batch of the evaluation set
             try:
                 batch = next(iterator)
             except StopIteration:
                 print('Iterators wrong')
                 break
-            
-            batch['label'] = batch['label'].to(
-                    self.args.device, 
-                    dtype=self.args.dtype, 
-                    non_blocking=self.args.non_blocking)
-            batch['data'] = batch['data'].to(
-                    self.args.device,
-                    self.args.dtype,
-                    non_blocking=self.args.non_blocking)
-            batch['meta']['weight'] = batch['meta']['weight'].to(
-                    self.args.device,
-                    self.args.dtype,
-                    non_blocking=self.args.non_blocking)
-        
-            if not self.slice_wise:
-                # divide into minibatches
-                minibatches = np.arange(batch['data'].shape[1],
-                        step=self.args.minibatch_size)
-                for i2, idx in enumerate(minibatches):
-                    if idx + self.args.minibatch_size < batch['data'].shape[1]:
-                        data = batch['data'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                        label = batch['label'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                        weight = batch['meta']['weight'][:,
-                                idx:idx+self.args.minibatch_size, :, :]
-                    else:
-                        data = batch['data'][:, idx:, :, :]
-                        label = batch['label'][:,idx:, :, :]
-                        weight = batch['meta']['weight'][:, idx:, :, :]
-             
-                    data = torch.squeeze(data, dim=0)
-                    label = torch.squeeze(label, dim=0)
-                    weight = torch.squeeze(weight, dim=0)
-                    
-                    label = torch.unsqueeze(label, dim=1)
-                    weight = torch.unsqueeze(weight, dim=1)
-                    
-                    prediction = self.model(data)
-                    # prediction = prediction.to('cpu')
-                    
-                    loss = self.lossfn(
-                            pred=prediction, 
-                            target=label,
-                            spatial_weight=weight,
-                            class_weight=self.class_weight,
-                            smoothness_weight=self.lossfn_smoothness,
-                            window=self.lossfn_window,
-                            spatial_weight_scale=self.lossfn_spatial_weight_scale)
-                    # loss running variable
-                    # add value for every minibatch
-                    # this should scale linearly with minibatch size
-                    # have to verify!
-                    running_loss += loss.data.item()
-                    
 
-            else:
-                data = batch['data']
-                label = batch['label']
-                weight = batch['meta']['weight']
-                
-                data = torch.squeeze(data, dim=1)
-                
-                prediction = self.model(data)
-                    
-                loss = self.lossfn(
-                        pred=prediction, 
-                        target=label,
-                        spatial_weight=weight,
-                        class_weight=self.class_weight,
-                        smoothness_weight=self.lossfn_smoothness,
-                        window=self.lossfn_window,
-                        spatial_weight_scale=self.lossfn_spatial_weight_scale)
-                
-                # loss running variable
-                # TODO: check if this works
-                # add value for every minibatch
-                # this should scale linearly with minibatch size
-                # have to verify!
-                current_loss = loss.data.item()
+            for subsample in batch:
+                running_loss += self._eval_one(subsample)
+                sizes += subsample['data'].shape[0]
 
-                running_loss += current_loss
-                self.debug('eval', i,'current loss', current_loss, 'batch', data.shape[0]) 
 
-        if self.slice_wise: 
-            epoch_loss = running_loss / (self.args.size_eval)
-        else:
-            epoch_loss = running_loss / (self.args.size_eval*batch['data'].shape[1])
-        
+        epoch_loss = running_loss / sizes
         self.history['eval']['epoch'].append(epoch)
         self.history['eval']['loss'].append(epoch_loss)
+
+        print("sum sizes eval", sizes)
+
+    def _eval_one(self, batch):
+
+        print(f"{batch['data'].shape=}")
+
+        batch['label'] = torch.squeeze(batch['label'], dim=0)
+        batch['data'] = torch.squeeze(batch['data'], dim=0)
+
+        #print(f"{batch['data'].shape=}")
+
+        running_loss = 0.0
+
+        # divide into minibatches
+        # use same batch size as for training
+        batch_size = self.train_dataset.batch_size
+        minibatches = np.arange(batch['data'].shape[0], step=batch_size)
+        for i, idx in enumerate(minibatches):
+            data = batch['data'][idx:idx+self.args.minibatch_size, ...]
+            label = batch['label'][idx:idx+self.args.minibatch_size, ...]
+
+            label = label.to(self.args.device,
+                             dtype=self.args.dtype,
+                             non_blocking=self.args.non_blocking)
+            data = data.to(self.args.device,
+                           self.args.dtype,
+                           non_blocking=self.args.non_blocking)
+
+            #print(f"{data.shape=}")
+
+            prediction = self.model(data)
+
+            loss = self.lossfn(input=prediction, target=label)
+
+            # loss running variable
+            # add value for every minibatch
+            running_loss += loss.data.item()
+
+        return running_loss
  
     def save_code_status(self):
         if not self.DEBUG:
@@ -921,8 +812,5 @@ class LayerNet(LayerNetBase):
             f = open(os.path.join(self.dirs['out'],'hist_' + self.today_id + pat + '.json'),'w')
             f.write(json_f)
             f.close()
-            
-    class helperClass():
-        pass
-        
 
+        
