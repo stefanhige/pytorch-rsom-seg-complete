@@ -60,8 +60,8 @@ if mode == 'train':
         net1.printConfiguration('logfile')
 
         net1.save_code_status()
-        net1.train_all_epochs()
-        net1.predict_calc()
+        #net1.train_all_epochs()
+        net1.predict()
         net1.save_model()
 
 

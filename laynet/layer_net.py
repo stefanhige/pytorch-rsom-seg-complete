@@ -6,6 +6,7 @@ import copy
 import json
 import warnings
 from timeit import default_timer as timer
+import nibabel as nib
 
 from types import SimpleNamespace
 
@@ -115,76 +116,76 @@ class LayerNetBase:
             # get the next volume to evaluate
             batch = next(iterator)
 
-            m = batch['meta']
+            prob_list = []
+            for subsample in batch:
+                prediction = self._predict_one(subsample)
+                prob_list.append((to_numpy(prediction, subsample['meta']), subsample['meta']))
 
-            batch['data'] = batch['data'].to(
-                    self.device,
-                    self.dtype,
-                    non_blocking=True
-                    )
+            # save the single probabilities
+            for el in prob_list:
+                data, meta = el
+                self._save_nii(data, meta=meta, fstr='ppred.nii.gz')
+                self._save_nii(data>=self.probability, meta=meta, fstr='pred.nii.gz')
 
-            # divide into minibatches
-            minibatches = np.arange(batch['data'].shape[1],
-                                    step=self.minibatch_size)
-            # init empty prediction stack
-            shp = batch['data'].shape
-            # [0 x 2 x 500 x 332]
-            prediction_stack = torch.zeros((0, 1, shp[3], shp[4]),
-                    dtype=self.dtype,
-                    requires_grad=False
-                    )
-            prediction_stack = prediction_stack.to(self.device)
+            # save combined one
+            assert(len(prob_list) == 2)
+            combined = (prob_list[0][0] + prob_list[1][0]) / 2
 
-            for i2, idx in enumerate(minibatches):
-                if idx + self.minibatch_size < batch['data'].shape[1]:
-                    data = batch['data'][:, idx:idx+self.minibatch_size, :, :]
-                else:
-                    data = batch['data'][:, idx:, :, :]
-
-                data = torch.squeeze(data, dim=0)
-
-                prediction = self.model(data)
-
-                prediction = prediction.detach()
-                prediction_stack = torch.cat((prediction_stack, prediction), dim=0)
-
-            prediction_stack = prediction_stack.to('cpu')
+            self._save_nii(combined, meta=meta, combined=True, fstr='ppred.nii.gz')
+            self._save_nii(combined>=self.probability, meta=meta, combined=True, fstr='pred.nii.gz')
 
 
-            # transform -> labels
-            prediction_stack = torch.sigmoid(prediction_stack)
+    def _save_nii(self, data, meta, combined=False, fstr=''):
 
-            label = prediction_stack >= self.probability
+        self.out_pred_dir = '/home/stefan/RSOM/testing/output'
+        filename = os.path.join(self.out_pred_dir, os.path.basename(meta['filename'][0]))
+        if not combined:
+            batch_axis = meta['batch_axis'][0]
+            fstr = '_' + batch_axis + '_' + fstr
+        else:
+            fstr = '_' + fstr
 
-            m = batch['meta']
+        if 'ppred' in fstr:
+            data = data.astype(np.float32)
+            img_data = nib.Nifti1Image(data, np.eye(4))
+            nib.save(img_data, filename.replace('.nii.gz', fstr))
+        else:
+            data = data.astype(np.uint8)
+            img_data = nib.Nifti1Image(data, np.eye(4))
+            nib.save(img_data, filename.replace('.nii.gz', fstr))
 
-            label = label.squeeze()
-            label = to_numpy(label, m)
 
-            filename = batch['meta']['filename'][0]
-            filename = filename.replace('rgb.nii.gz','')
+    def _predict_one(self, batch):
 
-            if 0:
-                label = self.smooth_pred(label, filename)
+        batch['data'] = batch['data'].to(self.device, self.dtype, non_blocking=True)
+        batch['data'] = torch.squeeze(batch['data'], dim=0)
 
-            print('Saving', filename)
-            save_nii(label.astype(np.uint8), self.out_pred_dir, filename + 'pred')
 
-            if 1:
-                save_nii(to_numpy(prediction_stack.squeeze(), m),
-                        self.out_pred_dir,
-                        filename + 'ppred')
-            # compare to ground truth
-            if 0:
-                label_gt = batch['label']
+        # divide into minibatches
+        minibatches = np.arange(batch['data'].shape[0], step=self.minibatch_size)
+        # init empty prediction stack
 
-                label_gt = torch.squeeze(label_gt, dim=0)
-                label_gt = to_numpy(label_gt, m)
+        shp = batch['data'].shape
+        # [0 x 2 x 500 x 332]
+        prediction_stack = torch.zeros((0, 1, shp[2], shp[3]),
+                                       dtype=self.dtype,
+                                       requires_grad=False
+                                       )
 
-                label_diff = (label > label_gt).astype(np.uint8)
-                label_diff += 2*(label < label_gt).astype(np.uint8)
-                # label_diff = label != label_gt
-                save_nii(label_diff, self.out_pred_dir, filename + 'dpred')
+        for i2, idx in enumerate(minibatches):
+            data = batch['data'][idx:idx+self.minibatch_size, ...]
+
+            prediction = self.model(data)
+
+            prediction = prediction.detach()
+            prediction = prediction.to('cpu')
+            prediction_stack = torch.cat((prediction_stack, prediction), dim=0)
+
+        # transform -> labels
+        prediction_stack = torch.sigmoid(prediction_stack)
+
+        return prediction_stack
+
 
     def predict_calc(self):
         self.model.eval()

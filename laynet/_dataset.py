@@ -259,11 +259,18 @@ class RsomLayerDataset(Dataset):
         data_batch = np.stack(data, axis=0)
         label_batch = np.stack(label, axis=0)
 
+
+        if '_xframe' in os.path.basename(npz_file):
+            batch_axis = 'x'
+        elif '_yframe' in os.path.basename(npz_file):
+            batch_axis = 'y'
+
         # add meta information
         meta = {'filename': filenames,
                 'dcrop': {'begin': None, 'end': None},
                 'lcrop': {'begin': None, 'end': None},
-                'weight': 0}
+                'weight': 0,
+                'batch_axis': batch_axis}
 
         sample = {'data': data_batch, 'label': label_batch, 'meta': meta}
 
@@ -280,8 +287,6 @@ class RsomLayerDataset(Dataset):
 
     def _getitem_test(self, idx):
         # TODO process both sides? x and y. either return list [x, y] or stack on top
-        print("TODO process both sides")
-        print("TODO sliding mip")
         return self._getvolume(idx)
 
     def _getvolume(self, idx):
@@ -321,14 +326,16 @@ class RsomLayerDataset(Dataset):
         meta_x = {'filename': self.data[idx],
                 'dcrop': {'begin': None, 'end': None},
                 'lcrop': {'begin': None, 'end': None},
-                'weight': 0}
+                'weight': 0,
+                'batch_axis': 'x'}
 
         sample_x = {'data': data_mip_x, 'label': label_mip_x, 'meta': meta_x}
 
         meta_y = {'filename': self.data[idx],
                    'dcrop': {'begin': None, 'end': None},
                    'lcrop': {'begin': None, 'end': None},
-                   'weight': 0}
+                   'weight': 0,
+                  'batch_axis': 'y'}
 
         sample_y = {'data': data_mip_y, 'label': label_mip_y, 'meta': meta_y}
 
@@ -609,199 +616,6 @@ class CropToEven:
         return {'data': data, 'label': label, 'meta': meta}
 
 
-class RSOMLayerDataset(Dataset):
-    """
-    rsom dataset class for layer segmentation
-    
-    Args:
-        root_dir (string): Directory with all the nii.gz files.
-        data_str (string): end part of filename of training data.
-        label_str (string): end part of filename of segmentation ground truth data.
-        transform (callable, optional): Optional transform to be applied
-                            on a sample.
-    """
-
-    def __init__(self,
-                 root_dir,
-                 data_str='_rgb.nii.gz',
-                 label_str='_l.nii.gz',
-                 slice_wise=False,
-                 transform=None):
-
-        assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
-            'root_dir not a valid directory'
-
-        self.root_dir = root_dir
-        self.transform = transform
-
-        assert isinstance(data_str, str) and isinstance(label_str, str), \
-            'data_str or label_str not valid.'
-
-        self.data_str = data_str
-        self.label_str = label_str
-        self.slice_wise = slice_wise
-
-        # get all files in root_dir
-        all_files = os.listdir(path=root_dir)
-        # extract the  data files
-        self.data = [el for el in all_files if el[-len(data_str):] == data_str]
-
-        if self.slice_wise:
-            data_path = os.path.join(self.root_dir,
-                                     self.data[0])
-            label_path = os.path.join(self.root_dir,
-                                      self.data[0].replace(self.data_str, self.label_str))
-
-            # read data
-            data = self._readNII(data_path)
-            data = np.stack([data['R'], data['G'], data['B']], axis=-1)
-            self.data_array = data.astype(np.float32)
-
-            # read label
-            label = self._readNII(label_path)
-            self.label_array = label.astype(np.float32)
-
-        assert len(self.data) == \
-               len([el for el in all_files if el[-len(label_str):] == label_str]), \
-            'Amount of data and label files not equal.'
-
-    def __len__(self):
-        if not self.slice_wise:
-            return len(self.data)
-        else:
-            return self.data_array.shape[1]
-
-    @staticmethod
-    def _readNII(rpath):
-        '''
-        read in the .nii.gz file
-        Args:
-            rpath (string)
-        '''
-
-        img = nib.load(str(rpath))
-
-        # TODO: when does nib get_fdata() support rgb?
-        # currently not, need to use old method get_data()
-        return img.get_data()
-
-    def __getitem__(self, idx):
-        if not self.slice_wise:
-            return self.getvolume(idx)
-        else:
-            return self.getslice(idx)
-
-    def getvolume(self, idx):
-        data_path = os.path.join(self.root_dir,
-                                 self.data[idx])
-        label_path = os.path.join(self.root_dir,
-                                  self.data[idx].replace(self.data_str, self.label_str))
-
-        # read data
-        data = self._readNII(data_path)
-        data = np.stack([data['R'], data['G'], data['B']], axis=-1)
-        data = data.astype(np.float32)
-
-        # read label
-        label = self._readNII(label_path)
-        label = label.astype(np.float32)
-
-        # add meta information
-        meta = {'filename': self.data[idx],
-                'dcrop': {'begin': None, 'end': None},
-                'lcrop': {'begin': None, 'end': None},
-                'weight': 0}
-
-        sample = {'data': data, 'label': label, 'meta': meta}
-
-        if self.transform:
-            sample = self.transform(sample)
-
-        return sample
-
-    def getslice(self, idx):
-        data = self.data_array[:, idx, ...]
-        data = np.expand_dims(data, 1)
-
-        label = self.label_array[:, idx, ...]
-        label = np.expand_dims(label, 1)
-        # add meta information
-        meta = {'filename': self.data[0] + " slice_wise " + str(idx),
-                'dcrop': {'begin': None, 'end': None},
-                'lcrop': {'begin': None, 'end': None},
-                'weight': 0}
-
-        sample = {'data': data, 'label': label, 'meta': meta}
-
-        if self.transform:
-            sample = self.transform(sample)
-
-        return sample
-
-
-class RSOMLayerDatasetUnlabeled(RSOMLayerDataset):
-    """
-    rsom dataset class for layer segmentation
-    for prediction of unlabeled data only
-    
-    Args:
-        root_dir (string): Directory with all the nii.gz files.
-        data_str (string): end part of filename of training data
-        transform (callable, optional): Optional transform to be applied
-                            on a sample.
-    """
-
-    def __init__(self, root_dir, data_str='_rgb.nii.gz', transform=None):
-        assert os.path.exists(root_dir) and os.path.isdir(root_dir), \
-            'root_dir not a valid directory'
-
-        self.root_dir = root_dir
-        self.transform = transform
-
-        assert isinstance(data_str, str), 'data_str or label_str not valid.'
-
-        self.data_str = data_str
-        # self.label_str = ''
-        self.slice_wise = False
-        # get all files in root_dir
-        all_files = os.listdir(path=root_dir)
-        # extract the  data files
-        self.data = [el for el in all_files if el[-len(data_str):] == data_str]
-
-        # assert len(self.data) == \
-        # len([el for el in all_files if el[-len(label_str):] == label_str]), \
-        # 'Amount of data and label files not equal.'
-
-    def __getitem__(self, idx):
-        data_path = os.path.join(self.root_dir,
-                                 self.data[idx])
-        # label_path = os.path.join(self.root_dir, 
-        #                            self.data[idx].replace(self.data_str, self.label_str))
-
-        # read data
-        data = self._readNII(data_path)
-        data = np.stack([data['R'], data['G'], data['B']], axis=-1)
-        data = data.astype(np.float32)
-
-        # read label
-        # label = self._readNII(label_path)
-        # label = label.astype(np.float32)
-        label = np.zeros((data.shape[0], data.shape[1], data.shape[2]), dtype=np.float32)
-
-        # add meta information
-        meta = {'filename': self.data[idx],
-                'dcrop': {'begin': None, 'end': None},
-                'lcrop': {'begin': None, 'end': None},
-                'weight': 0}
-
-        sample = {'data': data, 'label': label, 'meta': meta}
-
-        if self.transform:
-            sample = self.transform(sample)
-
-        return sample
-
-
 def to_numpy(volume, meta):
     '''
     inverse function for class ToTensor() in dataloader_dev.py 
@@ -811,11 +625,6 @@ def to_numpy(volume, meta):
 
     return V as numpy.array volume
     '''
-    # torch sizes X is batch size, C is Colour
-    # data
-    # [X x C x Z x Y] [171 x 3 x 500-crop x 333] (without crop)
-    # and for the label
-    # [X x Z x Y] [171 x 500 x 333]
 
     # we want to reshape to
     # numpy sizes
@@ -828,7 +637,8 @@ def to_numpy(volume, meta):
     if not isinstance(volume, np.ndarray):
         assert isinstance(volume, torch.Tensor)
         volume = volume.numpy()
-    volume = volume.transpose((1, 0, 2))
+
+    volume = np.squeeze(volume, axis=1)
 
     # add padding, which was removed before,
     # and saved in meta['lcrop'] and meta['dcrop']
@@ -839,17 +649,26 @@ def to_numpy(volume, meta):
     # parse label crop
     b = (meta['lcrop']['begin']).numpy().squeeze()
     e = (meta['lcrop']['end']).numpy().squeeze()
-    # print('b, e')
-    # print(b, e)
-    # print(b.shape, e.shape)
 
-    pad_width = ((b[0], e[0]), (b[1], e[1]), (b[2], e[2]))
-    # print(V.shape)
+
+    pad_width = list(zip(b, e))
 
     volume = np.pad(volume, pad_width, 'edge')
 
-    # print(V.shape)
-    return volume
+
+    batch_axis = meta['batch_axis']
+    if isinstance(batch_axis, list):
+        batch_axis = batch_axis[0]
+
+    if batch_axis == 'x':
+        volume = volume.transpose((1, 0, 2))
+    elif batch_axis == 'y':
+        volume = volume.transpose((1, 2, 0))
+    else:
+        raise AttributeError
+
+    return np.ascontiguousarray(volume)
+
 
 
 def show(element, idx=0):
@@ -874,15 +693,11 @@ if __name__ == '__main__':
 
     el_train = dataset_train[0]
 
-    train_dataloader = DataLoader(dataset_train, batch_size=1, shuffle=True, drop_last=False, num_workers=4, pin_memory=True)
-    for sample in train_dataloader:
-        print(sample['data'].shape)
-
 
     #RsomLayerDataset.save_nii(el_train, './')
 
     #el_numpy = to_numpy(el_train['label'], el_train['meta'])
-    if 0:
+    if 1:
         dataset_test = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile',
                                         training=False,
                                         transform=transforms.Compose([
@@ -893,6 +708,12 @@ if __name__ == '__main__':
 
         el_test = dataset_test[0]
 
-        RsomLayerDataset.save_nii(el_test, './')
+        ndarr = to_numpy(el_test[1]['label'], el_test[1]['meta'])
+
+        print(ndarr.shape)
+
+
+
+        #RsomLayerDataset.save_nii(el_test, './')
 
 
