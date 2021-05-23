@@ -18,8 +18,8 @@ from scipy import ndimage
 from ._model import UNet, Fcn
 import laynet._metrics as lfs #lfs=lossfunctions
 from ._dataset import RSOMLayerDataset, RSOMLayerDatasetUnlabeled, \
-                      RandomZShift, ZeroCenter, CropToEven, DropBlue, \
-                      ToTensor, precalcLossWeight, SwapDim, to_numpy
+                      RandomZShift, CropToEven, \
+                      ToTensor, to_numpy
 from utils import save_nii
 
 class LayerNetBase():
@@ -434,13 +434,13 @@ class LayerNet(LayerNetBase):
         # MODEL
         if model_type == 'unet':
             self.model = UNet(in_channels=2,
-                            n_classes=1,
-                            depth=model_depth,
-                            wf=6,
-                            padding=True,
-                            batch_norm=True,
-                            up_mode='upconv',
-                            dropout=dropout)
+                              n_classes=1,
+                              depth=model_depth,
+                              wf=6,
+                              padding=True,
+                              batch_norm=True,
+                              up_mode='upconv',
+                              dropout=dropout)
         elif model_type =='fcn':
             self.model = Fcn()
         else:
@@ -672,15 +672,6 @@ class LayerNet(LayerNetBase):
         print('finished training.')
     
     def train(self, iterator, epoch):
-        '''
-        '''
-        # PARSE
-        # model = self.model
-        # optimizer = self.optimizer
-        # history = self.history
-        # lossfn = self.lossfn
-        # args = self.args
-        
         self.model.train()
         
         for i in range(int(np.ceil(self.args.size_train/self.train_batch_size))):
