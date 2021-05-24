@@ -38,18 +38,26 @@ class LayerNetBase:
                  dirs={'train':'', 'eval':'', 'pred':'', 'model':'', 'out':''},
                  device=torch.device('cuda'),
                  model_depth=4,
-                 probability=0.5,
-                 model_type='unet'
+                 decision_boundary=0.5,
+                 model_type='unet',
+                 dropout=True,
+                 batch_size=1,
+                 DEBUG=False
                  ):
 
+        self.logfile = None
+        self.DEBUG = DEBUG
+        if DEBUG:
+            print('DEBUG MODE')
         self.model_depth = model_depth
         self.dirs = dirs
         self.out_pred_dir = dirs['out']
-        self.probability = probability
+        self.decision_boundary = decision_boundary
 
-
+        # DATASET
         self.pred_dataset = RsomLayerDataset(self.dirs['pred'],
                                              training=False,
+                                             batch_size=batch_size,
                                              transform=transforms.Compose([
                                                  CropToEven(network_depth=self.model_depth),
                                                  ToTensor()])
@@ -61,11 +69,14 @@ class LayerNetBase:
                                           num_workers=4,
                                           pin_memory=True)
 
+        # ARGS
+        self.args = SimpleNamespace()
+        self.args.device = device
+        self.args.dtype = torch.float32
+        self.args.minibatch_size = batch_size
+        self.args.non_blocking = True
 
-        self.size_pred = len(self.pred_dataset)
-        self.device = device
-        self.dtype = torch.float32
-
+        # MODEL
         if model_type == 'unet':
             self.model = UNet(in_channels=2,
                             n_classes=1,
@@ -74,28 +85,26 @@ class LayerNetBase:
                             padding=True,
                             batch_norm=True,
                             up_mode='upconv',
-                            dropout=True)
+                            dropout=dropout)
         elif model_type =='fcn':
             self.model = Fcn()
         else:
             raise NotImplementedError
 
-        self.model = self.model.to(self.device)
-
-        self.minibatch_size = 1 if model_type == 'unet' else 9
+        self.model = self.model.to(self.args.device)
+        self.model.float()
 
         if self.dirs['model']:
             self.model.load_state_dict(torch.load(self.dirs['model']))
+            self.printandlog("Load model from", self.dirs['model'])
         else:
-            raise Exception("No model!")
+            self.printandlog("Did not load model.")
 
     def printandlog(self, *msg):
-        if 1:
-            print(*msg)
-            try:
-                print(*msg, file=self.logfile)
-            except:
-                pass
+        print(*msg)
+        if not self.DEBUG and self.logfile != None:
+            with open(self.logfile, 'a') as fd:
+                print(*msg, file=fd)
 
     def calc_metrics(self, ground_truth, label):
         print(ground_truth.shape)
@@ -112,7 +121,7 @@ class LayerNetBase:
         self.model.eval()
         iterator = iter(self.pred_dataloader)
 
-        for i in range(self.size_pred):
+        for i in range(len(self.pred_dataset)):
             # get the next volume to evaluate
             batch = next(iterator)
 
@@ -125,19 +134,17 @@ class LayerNetBase:
             for el in prob_list:
                 data, meta = el
                 self._save_nii(data, meta=meta, fstr='ppred.nii.gz')
-                self._save_nii(data>=self.probability, meta=meta, fstr='pred.nii.gz')
+                self._save_nii(data >= self.decision_boundary, meta=meta, fstr='pred.nii.gz')
 
             # save combined one
             assert(len(prob_list) == 2)
             combined = (prob_list[0][0] + prob_list[1][0]) / 2
 
             self._save_nii(combined, meta=meta, combined=True, fstr='ppred.nii.gz')
-            self._save_nii(combined>=self.probability, meta=meta, combined=True, fstr='pred.nii.gz')
-
+            self._save_nii(combined >= self.decision_boundary, meta=meta, combined=True, fstr='pred.nii.gz')
 
     def _save_nii(self, data, meta, combined=False, fstr=''):
 
-        self.out_pred_dir = '/home/stefan/RSOM/testing/output'
         filename = os.path.join(self.out_pred_dir, os.path.basename(meta['filename'][0]))
         if not combined:
             batch_axis = meta['batch_axis'][0]
@@ -148,32 +155,34 @@ class LayerNetBase:
         if 'ppred' in fstr:
             data = data.astype(np.float32)
             img_data = nib.Nifti1Image(data, np.eye(4))
-            nib.save(img_data, filename.replace('.nii.gz', fstr))
+            if not self.DEBUG:
+                nib.save(img_data, filename.replace('.nii.gz', fstr))
         else:
             data = data.astype(np.uint8)
             img_data = nib.Nifti1Image(data, np.eye(4))
-            nib.save(img_data, filename.replace('.nii.gz', fstr))
-
+            if not self.DEBUG:
+                nib.save(img_data, filename.replace('.nii.gz', fstr))
 
     def _predict_one(self, batch):
-
-        batch['data'] = batch['data'].to(self.device, self.dtype, non_blocking=True)
+        batch['data'] = batch['data'].to(self.args.device,
+                                         self.args.dtype,
+                                         non_blocking=self.args.non_blocking)
         batch['data'] = torch.squeeze(batch['data'], dim=0)
 
 
         # divide into minibatches
-        minibatches = np.arange(batch['data'].shape[0], step=self.minibatch_size)
+        minibatches = np.arange(batch['data'].shape[0], step=self.args.minibatch_size)
         # init empty prediction stack
 
         shp = batch['data'].shape
         # [0 x 2 x 500 x 332]
         prediction_stack = torch.zeros((0, 1, shp[2], shp[3]),
-                                       dtype=self.dtype,
+                                       dtype=self.args.dtype,
                                        requires_grad=False
                                        )
 
         for i2, idx in enumerate(minibatches):
-            data = batch['data'][idx:idx+self.minibatch_size, ...]
+            data = batch['data'][idx:idx+self.args.minibatch_size, ...]
 
             prediction = self.model(data)
 
@@ -185,7 +194,6 @@ class LayerNetBase:
         prediction_stack = torch.sigmoid(prediction_stack)
 
         return prediction_stack
-
 
     def predict_calc(self):
         self.model.eval()
@@ -236,7 +244,7 @@ class LayerNetBase:
             # transform -> labels
             prediction_stack = torch.sigmoid(prediction_stack)
 
-            label = prediction_stack >= self.probability
+            label = prediction_stack >= self.decision_boundary
 
             m = batch['meta']
 
@@ -385,16 +393,23 @@ class LayerNet(LayerNetBase):
                  epochs = 30,
                  dropout = False,
                  DEBUG = False,
-                 probability=0.5,
+                 decision_boundary=0.5,
+                 batch_size=1
                  ):
 
-        self.sdesc = sdesc 
+        super().__init__(dirs=dirs,
+                         device=device,
+                         model_depth=model_depth,
+                         decision_boundary=decision_boundary,
+                         model_type=model_type,
+                         dropout=dropout,
+                         batch_size=batch_size,
+                         DEBUG=DEBUG)
 
-        self.DEBUG = DEBUG
+        self.sdesc = sdesc
+
         self.LOG = True
-        if DEBUG:
-            print('DEBUG MODE')
-#
+
         out_root_list = os.listdir(dirs['out'])
 
         today = date.today().strftime('%y%m%d')
@@ -404,8 +419,6 @@ class LayerNet(LayerNetBase):
         else:
             nr = 0
 
-        self.dirs = dirs
-        
         self.today_id = today + '-{:02d}'.format(nr)
         self.dirs['out'] = os.path.join(self.dirs['out'], self.today_id)
         if self.sdesc:
@@ -416,39 +429,21 @@ class LayerNet(LayerNetBase):
         # PROCESS LOGGING
         if not self.DEBUG: 
             os.mkdir(self.dirs['out'])
-            if self.LOG:
-                try:
-                    self.logfile = open(os.path.join(self.dirs['out'], 
-                        'log' + self.today_id), 'x')
-                except:
-                    print('Couldn\'n open logfile')
-            else:
-                self.logfile=None
-        
+            self.logfile = os.path.join(self.dirs['out'], 'log' + self.today_id)
+        else:
+            self.logfile = None
+
         if self.dirs['pred']:
             if not self.DEBUG:
-                self.out_pred_dir = os.path.join(self.dirs['out'],'prediction')
+                # overwrite out_pred_dir from superclass
+                self.out_pred_dir = os.path.join(self.dirs['out'], 'prediction')
                 os.mkdir(self.out_pred_dir)
+            else:
+                self.out_pred_dir = ''
 
         # MODEL
-        if model_type == 'unet':
-            self.model = UNet(in_channels=2,
-                              n_classes=1,
-                              depth=model_depth,
-                              wf=6,
-                              padding=True,
-                              batch_norm=True,
-                              up_mode='upconv',
-                              dropout=dropout)
-        elif model_type =='fcn':
-            self.model = Fcn()
-        else:
-            raise NotImplementedError
         self.model_dropout = dropout
-        
-        self.model = self.model.to(device)
-        self.model = self.model.float()
-        
+
         if model_type == 'unet':
             print(self.model.down_path[0].block.state_dict()['0.weight'].device)
 
@@ -461,22 +456,14 @@ class LayerNet(LayerNetBase):
             self.class_weight = self.class_weight.to(device)
         else:
             self.class_weight = None
-
-        self.lossfn_smoothness = lossfn_smoothness
-        self.lossfn_window = lossfn_window
-        self.lossfn_spatial_weight_scale = lossfn_spatial_weight_scale
         
         # DATASET
         self.train_dataset_zshift = dataset_zshift
-        self._setup_dataloaders()
+        self._setup_dataloaders(batch_size=batch_size)
 
         # OPTIMIZER
         self.initial_lr = initial_lr
         self._setup_optimizer(optimizer=optimizer, scheduler_patience=scheduler_patience)
-
-        self.probability = probability
-        self.train_batch_size = self.train_dataset.batch_size
-
 
         # HISTORY
         self.history = {
@@ -484,31 +471,18 @@ class LayerNet(LayerNetBase):
                 'eval': {'epoch': [], 'loss': [], 'unred_loss': []}
                 }
 
-        # CURRENT EPOCH
-        self.curr_epoch = None
         
         # ADDITIONAL ARGS
-        self.args = SimpleNamespace()
-        
-        self.size_pred = len(self.pred_dataset)
-        self.args.size_train = len(self.train_dataset)
-        self.args.size_eval = len(self.eval_dataset)
-        self.args.minibatch_size = 5 if model_type == 'unet' else 9
-        self.minibatch_size = self.args.minibatch_size
-        self.args.device = device
-        self.device = device
-        self.args.dtype = torch.float32
-        self.dtype = self.args.dtype
-        self.args.non_blocking = True
         self.args.n_epochs = epochs
 
         # TODO fix this
         self.args.data_dim = self.eval_dataset[0][0]['data'].shape
 
-    def _setup_dataloaders(self):
+    def _setup_dataloaders(self, batch_size):
 
         self.train_dataset = RsomLayerDataset(self.dirs['train'],
                                               training=True,
+                                              batch_size=batch_size,
                                               transform=transforms.Compose([
                                                   RandomZShift(max_shift=self.train_dataset_zshift),
                                                   RandomMirror(),
@@ -526,6 +500,7 @@ class LayerNet(LayerNetBase):
 
         self.eval_dataset = RsomLayerDataset(self.dirs['eval'],
                                              training=False,
+                                             batch_size=batch_size,
                                              transform=transforms.Compose([
                                                  CropToEven(network_depth=self.model_depth),
                                                  ToTensor()])
@@ -538,19 +513,6 @@ class LayerNet(LayerNetBase):
                                           num_workers=4,
                                           pin_memory=True)
 
-        if self.dirs['pred']:
-            self.pred_dataset = RsomLayerDataset(self.dirs['eval'],
-                                                 training=False,
-                                                 transform=transforms.Compose([
-                                                     CropToEven(network_depth=self.model_depth),
-                                                     ToTensor()])
-                                                 )
-
-            self.pred_dataloader = DataLoader(self.pred_dataset,
-                                              batch_size=1,
-                                              shuffle=False,
-                                              num_workers=4,
-                                              pin_memory=True)
 
     def _setup_optimizer(self, *, optimizer, scheduler_patience):
         if optimizer == 'Adam':
@@ -578,36 +540,31 @@ class LayerNet(LayerNetBase):
         if self.DEBUG:
             print(*msg)
 
-    def printConfiguration(self, destination='stdout'):
-        if destination == 'stdout':
-            where = sys.stdout
-        elif destination == 'logfile' and not self.DEBUG:
-            where = self.logfile
-        
-        if destination=='logfile' and self.DEBUG:
-            pass
-        else:
-            print('LayerUNET configuration:',file=where)
-            print('DATA: train dataset loc:', self.dirs['train'], file=where)
-            print('      train dataset len:', self.args.size_train, file=where)
-            print('      eval dataset loc:', self.dirs['eval'], file=where)
-            print('      eval dataset len:', self.args.size_eval, file=where)
-            print('      shape:', self.args.data_dim, file=where)
-            print('      zshift:', self.train_dataset_zshift)
-            print('EPOCHS:', self.args.n_epochs, file=where)
-            print('OPTIMIZER:', self.optimizer, file=where)
-            print('initial lr:', self.initial_lr, file=where)
-            print('LOSS: fn', self.lossfn, file=where)
-            print('      class_weight', self.class_weight, file=where)
-            print('      smoothnes param', self.lossfn_smoothness, file=where)
-            print('      window', self.lossfn_window, file=where)
-            print('CNN:  unet', file=where)
-            print('      depth', self.model_depth, file=where)
-            print('      dropout?', self.model_dropout, file=where)
-            print('OUT:  model:', self.dirs['model'], file=where)
-            print('      pred:', self.dirs['pred'], file=where)
-            print('')
-            print(self.model, file=where)
+    def _print(self, where):
+        print('LayerUNET configuration:', file=where)
+        print('DATA: train dataset loc:', self.dirs['train'], file=where)
+        print('      train dataset len:', len(self.train_dataset), file=where)
+        print('      eval dataset loc:', self.dirs['eval'], file=where)
+        print('      eval dataset len:', len(self.eval_dataset), file=where)
+        print('      zshift:', self.train_dataset_zshift)
+        print('EPOCHS:', self.args.n_epochs, file=where)
+        print('OPTIMIZER:', self.optimizer, file=where)
+        print('initial lr:', self.initial_lr, file=where)
+        print('LOSS: fn', self.lossfn, file=where)
+        print('      class_weight', self.class_weight, file=where)
+        print('CNN:  unet', file=where)
+        print('      depth', self.model_depth, file=where)
+        print('      dropout?', self.model_dropout, file=where)
+        print('OUT:  model:', self.dirs['model'], file=where)
+        print('      pred:', self.dirs['pred'], file=where)
+        print('')
+        print(self.model, file=where)
+
+    def printConfiguration(self):
+        self._print(sys.stdout)
+        if not self.DEBUG and self.logfile != None:
+            with open(self.logfile, 'a') as fd:
+                self._print(fd)
 
     def train_all_epochs(self):  
         self.best_model = copy.deepcopy(self.model.state_dict())
@@ -648,7 +605,7 @@ class LayerNet(LayerNetBase):
             le_idx = self.history['train']['epoch'].index(curr_epoch)
             le_losses = self.history['train']['loss'][le_idx:]
 
-            print("sum sizes train", (len(self.train_dataset) * self.train_dataset.batch_size))
+            self.debug("N 2D slices train", (len(self.train_dataset) * self.train_dataset.batch_size))
             train_loss = sum(le_losses)  / (len(self.train_dataset) * self.train_dataset.batch_size)
             # extract most recent eval loss
             curr_loss = self.history['eval']['loss'][-1]
@@ -665,14 +622,11 @@ class LayerNet(LayerNetBase):
             else:
                 found_nb = ''
         
-            print('Epoch {:d} of {:d}: lr={:.0e}, Lt={:.2e}, Le={:.2e}'.format(
+            self.printandlog('Epoch {:d} of {:d}: lr={:.0e}, Lt={:.2e}, Le={:.2e}'.format(
                 curr_epoch+1, 
-                self.args.n_epochs, curr_lr, train_loss, curr_loss), found_nb)
-            if not self.DEBUG:
-                print('Epoch {:d} of {:d}: lr={:.0e}, Lt={:.2e}, Le={:.2e}'.format(
-                    curr_epoch+1, 
-                    self.args.n_epochs, curr_lr, train_loss, curr_loss), found_nb, file=self.logfile)
-    
+                self.args.n_epochs, curr_lr, train_loss, curr_loss), found_nb
+            )
+
         print('finished training.')
     
     def train(self, iterator, epoch):
@@ -739,11 +693,11 @@ class LayerNet(LayerNetBase):
         self.history['eval']['epoch'].append(epoch)
         self.history['eval']['loss'].append(epoch_loss)
 
-        print("sum sizes eval", sizes)
+        self.debug("N 2D slices eval", sizes)
 
     def _eval_one(self, batch):
 
-        print(f"{batch['data'].shape=}")
+        #print(f"{batch['data'].shape=}")
 
         batch['label'] = torch.squeeze(batch['label'], dim=0)
         batch['data'] = torch.squeeze(batch['data'], dim=0)
@@ -800,18 +754,26 @@ class LayerNet(LayerNetBase):
             dice.append(lfs.calc_dice(ground_truth[:,i,...], label[:,i,...]))
         return prec, recall, dice
 
-    def save_model(self, model='best', pat=''):
+    def save_model(self, model='both', pat=''):
         if not self.DEBUG:
-            if model=='best':
-                save_this = self.best_model
-            elif model=='last':
-                save_this = self.last_model
+            if model == 'both':
+                self.save_model(model='best', pat=pat)
+                self.save_model(model='last', pat=pat)
+            else:
+                if model == 'best':
+                    save_this = self.best_model
+                elif model == 'last':
+                    save_this = self.model.state_dict()
+                else:
+                    raise NotImplementedError
             
-            torch.save(save_this, os.path.join(self.dirs['out'],'mod' + self.today_id + pat + '.pt'))
+                torch.save(save_this, os.path.join(
+                    self.dirs['out'],
+                    'mod' + self.today_id + '_' + model + '_' + pat + '.pt'))
             
-            json_f = json.dumps(self.history)
-            f = open(os.path.join(self.dirs['out'],'hist_' + self.today_id + pat + '.json'),'w')
-            f.write(json_f)
-            f.close()
+                json_f = json.dumps(self.history)
+                f = open(os.path.join(self.dirs['out'], 'hist_' + self.today_id + pat + '.json'), 'w')
+                f.write(json_f)
+                f.close()
 
         

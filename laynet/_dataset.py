@@ -43,7 +43,7 @@ class RsomLayerDataset(Dataset):
                  data_str='_rgb.nii.gz',
                  label_str='_l.nii.gz',
                  batch_size=2,
-                 sliding_window_size=9,
+                 sliding_window_size=5,
                  training=True,
                  transform=None):
 

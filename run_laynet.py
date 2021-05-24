@@ -8,24 +8,23 @@ from laynet import LayerNet, LayerNetBase
 mode = 'train'
 
 if mode == 'train':
-    N = 5
 
     sdesc = ['test']
 
     root_dir = '/home/stefan/RSOM/testing/onefile'
 
-    #DEBUG = False
-    DEBUG = True
+    DEBUG = False
+    #DEBUG = True
 
-    out_dir = '/home/stefan/RSOM/testing/onefile'
+    out_dir = '/home/stefan/RSOM/testing/output'
 
     model_type = 'unet'
 
     #os.environ["CUDA_VISIBLE_DEVICES"]='4'
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #device = torch.device('cuda')
 
-    for idx in range(N):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    for idx in range(len(sdesc)):
         root_dir = root_dir
         train_dir = root_dir
         eval_dir = root_dir
@@ -53,28 +52,28 @@ if mode == 'train':
                         dropout=True,
                         class_weight=None,
                         DEBUG=DEBUG,
-                        probability=0.5,
-                         )
+                        batch_size=2,
+                        decision_boundary=0.5
+                        )
 
         net1.printConfiguration()
-        net1.printConfiguration('logfile')
-
         net1.save_code_status()
-        #net1.train_all_epochs()
+        net1.train_all_epochs()
         net1.predict()
         net1.save_model()
-
 
 elif mode == 'predict':
 
     os.environ["CUDA_VISIBLE_DEVICES"]='4'
-    #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device = torch.device('cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #device = torch.device('cpu')
    
-    pred_dir = '/home/stefan/Downloads/nils/in'
+    pred_dir = '/home/stefan/RSOM/testing/onefile'
+
     # model_dir ='/home/gerlstefan/models/layerseg/test/mod_191101_depth5.pt'
-    model_dir ='/home/stefan/data/layerunet/miccai/200203-02-BCE_S_2000/mod200203-02.pt'
-    out_dir ='/home/stefan/Downloads/nils/out'
+    model_dir ='/home/stefan/RSOM/testing/output/210524-03-test/mod210524-03_best_.pt'
+
+    out_dir ='/home/stefan/RSOM/testing/output'
     model_type = 'unet'
     
     net1 = LayerNetBase(
@@ -82,9 +81,10 @@ elif mode == 'predict':
                   'pred': pred_dir,
                   'out': out_dir},
             device=device,
-            model_depth=5,
+            model_depth=1,
+            batch_size=2,
             model_type=model_type)
-    net1.predict_calc()
+    net1.predict()
 
 
 
