@@ -386,15 +386,13 @@ class LayerNet(LayerNetBase):
                  initial_lr = 1e-4,
                  scheduler_patience = 3,
                  lossfn = lfs.custom_loss_1,
-                 lossfn_smoothness=0,
-                 lossfn_window=5,
-                 lossfn_spatial_weight_scale=True,
                  class_weight = None,
                  epochs = 30,
                  dropout = False,
                  DEBUG = False,
                  decision_boundary=0.5,
-                 batch_size=1
+                 batch_size=1,
+                 aug_params=None
                  ):
 
         super().__init__(dirs=dirs,
@@ -406,6 +404,7 @@ class LayerNet(LayerNetBase):
                          batch_size=batch_size,
                          DEBUG=DEBUG)
 
+        self.aug_params = aug_params
         self.sdesc = sdesc
 
         self.LOG = True
@@ -483,8 +482,9 @@ class LayerNet(LayerNetBase):
         self.train_dataset = RsomLayerDataset(self.dirs['train'],
                                               training=True,
                                               batch_size=batch_size,
+                                              sliding_window_size=self.aug_params.sliding_window_size,
                                               transform=transforms.Compose([
-                                                  RandomZShift(max_shift=self.train_dataset_zshift),
+                                                  RandomZShift(max_shift=self.aug_params.zshift),
                                                   RandomMirror(),
                                                   CropToEven(network_depth=self.model_depth),
                                                   IntensityTransform(),
@@ -495,7 +495,7 @@ class LayerNet(LayerNetBase):
                                            batch_size=1,
                                            shuffle=True,
                                            drop_last=False,
-                                           num_workers=4,
+                                           num_workers=8,
                                            pin_memory=True)
 
         self.eval_dataset = RsomLayerDataset(self.dirs['eval'],
@@ -546,7 +546,8 @@ class LayerNet(LayerNetBase):
         print('      train dataset len:', len(self.train_dataset), file=where)
         print('      eval dataset loc:', self.dirs['eval'], file=where)
         print('      eval dataset len:', len(self.eval_dataset), file=where)
-        print('      zshift:', self.train_dataset_zshift)
+        print('AUG:', file=where)
+        print(self.aug_params, file=where)
         print('EPOCHS:', self.args.n_epochs, file=where)
         print('OPTIMIZER:', self.optimizer, file=where)
         print('initial lr:', self.initial_lr, file=where)
