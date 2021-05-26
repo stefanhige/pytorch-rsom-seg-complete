@@ -60,7 +60,7 @@ if mode == 'train':
                         initial_lr=1e-4,
                         scheduler_patience=3,
                         lossfn=torch.nn.BCEWithLogitsLoss(reduction='sum'),
-                        epochs=1,
+                        epochs=20,
                         dropout=True,
                         class_weight=None,
                         DEBUG=DEBUG,

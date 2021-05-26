@@ -42,6 +42,7 @@ class LayerNetBase:
                  model_type='unet',
                  dropout=True,
                  batch_size=1,
+                 sliding_window_size=1,
                  DEBUG=False
                  ):
 
@@ -58,6 +59,7 @@ class LayerNetBase:
         self.pred_dataset = RsomLayerDataset(self.dirs['pred'],
                                              training=False,
                                              batch_size=batch_size,
+                                             sliding_window_size=sliding_window_size,
                                              transform=transforms.Compose([
                                                  CropToEven(network_depth=self.model_depth),
                                                  ToTensor()])
@@ -66,7 +68,7 @@ class LayerNetBase:
         self.pred_dataloader = DataLoader(self.pred_dataset,
                                           batch_size=1,
                                           shuffle=False,
-                                          num_workers=4,
+                                          num_workers=2,
                                           pin_memory=True)
 
         # ARGS
@@ -117,8 +119,10 @@ class LayerNetBase:
             dice.append(lfs.calc_dice(ground_truth[:,i,...], label[:,i,...]))
         return prec, recall, dice
 
-    def predict(self):
-        self.model.eval()
+    def predict(self, model=None):
+        if model is None:
+            model = self.model.eval()
+
         iterator = iter(self.pred_dataloader)
 
         for i in range(len(self.pred_dataset)):
@@ -127,7 +131,7 @@ class LayerNetBase:
 
             prob_list = []
             for subsample in batch:
-                prediction = self._predict_one(subsample)
+                prediction = self._predict_one(batch=subsample, model=model)
                 prob_list.append((to_numpy(prediction, subsample['meta']), subsample['meta']))
 
             # save the single probabilities
@@ -163,7 +167,7 @@ class LayerNetBase:
             if not self.DEBUG:
                 nib.save(img_data, filename.replace('.nii.gz', fstr))
 
-    def _predict_one(self, batch):
+    def _predict_one(self, batch, model):
         batch['data'] = batch['data'].to(self.args.device,
                                          self.args.dtype,
                                          non_blocking=self.args.non_blocking)
@@ -184,7 +188,7 @@ class LayerNetBase:
         for i2, idx in enumerate(minibatches):
             data = batch['data'][idx:idx+self.args.minibatch_size, ...]
 
-            prediction = self.model(data)
+            prediction = model(data)
 
             prediction = prediction.detach()
             prediction = prediction.to('cpu')
@@ -402,6 +406,7 @@ class LayerNet(LayerNetBase):
                          model_type=model_type,
                          dropout=dropout,
                          batch_size=batch_size,
+                         sliding_window_size=aug_params.sliding_window_size,
                          DEBUG=DEBUG)
 
         self.aug_params = aug_params
@@ -495,12 +500,13 @@ class LayerNet(LayerNetBase):
                                            batch_size=1,
                                            shuffle=True,
                                            drop_last=False,
-                                           num_workers=8,
+                                           num_workers=6,
                                            pin_memory=True)
 
         self.eval_dataset = RsomLayerDataset(self.dirs['eval'],
                                              training=False,
                                              batch_size=batch_size,
+                                             sliding_window_size=self.aug_params.sliding_window_size,
                                              transform=transforms.Compose([
                                                  CropToEven(network_depth=self.model_depth),
                                                  ToTensor()])
@@ -510,7 +516,7 @@ class LayerNet(LayerNetBase):
                                           batch_size=1,
                                           shuffle=False,
                                           drop_last=False,
-                                          num_workers=4,
+                                          num_workers=2,
                                           pin_memory=True)
 
 
@@ -588,7 +594,7 @@ class LayerNet(LayerNetBase):
             self.debug('train') 
             self.train(iterator=train_iterator, epoch=curr_epoch)
             
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             if curr_epoch == 1:
                 toc = timer()
                 print('Training took:', toc - tic)
@@ -601,7 +607,7 @@ class LayerNet(LayerNetBase):
                 toc = timer()
                 print('Evaluation took:', toc - tic)
                 
-            print(torch.cuda.memory_cached()*1e-6,'MB memory used')
+            # print(torch.cuda.memory_cached()*1e-6,'MB memory used')
             # extract the average training loss of the epoch
             le_idx = self.history['train']['epoch'].index(curr_epoch)
             le_losses = self.history['train']['loss'][le_idx:]
