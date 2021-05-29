@@ -1,9 +1,10 @@
 ## Dataset
 
 rescale augmentation
-
+less intensity
 
 ## Laynet
 
-adjust learning rate scheduling
-implement prediction + metrics
+check metrics!
+
+check class weight for loss

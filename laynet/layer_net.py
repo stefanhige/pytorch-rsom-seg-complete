@@ -115,8 +115,7 @@ class LayerNetBase:
         self.printandlog("Metrics of eval set:")
         self.printandlog(json.dumps(results, indent=2))
 
-
-    def predict(self, model=None):
+    def predict(self, model=None, save=True):
         self.metricCalculator = MetricCalculator()
 
         if model is None:
@@ -131,28 +130,29 @@ class LayerNetBase:
             prob_list = []
             for subsample in batch:
                 prediction = self._predict_one(batch=subsample, model=model)
-                print(f'{prediction.shape=}')
+                # print(f'{prediction.shape=}')
                 prob_list.append((to_numpy(prediction, subsample['meta']), subsample['meta']))
 
             # save the single probabilities
             for el in prob_list:
                 data, meta = el
-                self._save_nii(data, meta=meta, fstr='ppred.nii.gz')
-                self._save_nii(data >= self.decision_boundary, meta=meta, fstr='pred.nii.gz')
+                if save:
+                    self._save_nii(data, meta=meta, fstr='ppred.nii.gz')
+                    self._save_nii(data >= self.decision_boundary, meta=meta, fstr='pred.nii.gz')
 
             # save combined one
             assert(len(prob_list) == 2)
             combined = (prob_list[0][0] + prob_list[1][0]) / 2
 
-            self._save_nii(combined, meta=meta, combined=True, fstr='ppred.nii.gz')
-            self._save_nii(combined >= self.decision_boundary, meta=meta, combined=True, fstr='pred.nii.gz')
-            print(f"{batch[0]['label'].shape=}")
+            if save:
+                self._save_nii(combined, meta=meta, combined=True, fstr='ppred.nii.gz')
+                self._save_nii(combined >= self.decision_boundary, meta=meta, combined=True, fstr='pred.nii.gz')
+            # print(f"{batch[0]['label'].shape=}")
 
             # batch[0] and batch[1] have the same label
             self.metricCalculator.register_sample(label=to_numpy(torch.squeeze(batch[0]['label'], dim=0), batch[0]['meta']),
                                                   prediction=combined,
                                                   name=os.path.basename(meta['filename'][0]))
-
 
     def _save_nii(self, data, meta, combined=False, fstr=''):
         filename = os.path.join(self.out_pred_dir, os.path.basename(meta['filename'][0]))
