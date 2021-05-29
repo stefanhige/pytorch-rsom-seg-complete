@@ -24,6 +24,7 @@ from ._dataset import RsomLayerDataset, \
                       RandomZShift, CropToEven, RandomMirror, IntensityTransform, \
                       ToTensor, to_numpy
 from utils import save_nii
+from ._metrics import MetricCalculator
 
 class LayerNetBase:
     """
@@ -108,18 +109,16 @@ class LayerNetBase:
             with open(self.logfile, 'a') as fd:
                 print(*msg, file=fd)
 
-    def calc_metrics(self, ground_truth, label):
-        print(ground_truth.shape)
-        prec = []
-        recall = []
-        dice = []
-        for i in range(ground_truth.shape[1]):
-            prec.append(lfs.calc_precision(ground_truth[:,i,...], label[:,i,...]))
-            recall.append(lfs.calc_recall(ground_truth[:,i,...], label[:,i,...]))
-            dice.append(lfs.calc_dice(ground_truth[:,i,...], label[:,i,...]))
-        return prec, recall, dice
+    def calc_metrics(self):
+        results = self.metricCalculator.calculate(p=self.decision_boundary)
+        self.printandlog("")
+        self.printandlog("Metrics of eval set:")
+        self.printandlog(json.dumps(results, indent=2))
+
 
     def predict(self, model=None):
+        self.metricCalculator = MetricCalculator()
+
         if model is None:
             model = self.model.eval()
 
@@ -132,6 +131,7 @@ class LayerNetBase:
             prob_list = []
             for subsample in batch:
                 prediction = self._predict_one(batch=subsample, model=model)
+                print(f'{prediction.shape=}')
                 prob_list.append((to_numpy(prediction, subsample['meta']), subsample['meta']))
 
             # save the single probabilities
@@ -146,9 +146,15 @@ class LayerNetBase:
 
             self._save_nii(combined, meta=meta, combined=True, fstr='ppred.nii.gz')
             self._save_nii(combined >= self.decision_boundary, meta=meta, combined=True, fstr='pred.nii.gz')
+            print(f"{batch[0]['label'].shape=}")
+
+            # batch[0] and batch[1] have the same label
+            self.metricCalculator.register_sample(label=to_numpy(torch.squeeze(batch[0]['label'], dim=0), batch[0]['meta']),
+                                                  prediction=combined,
+                                                  name=os.path.basename(meta['filename'][0]))
+
 
     def _save_nii(self, data, meta, combined=False, fstr=''):
-
         filename = os.path.join(self.out_pred_dir, os.path.basename(meta['filename'][0]))
         if not combined:
             batch_axis = meta['batch_axis'][0]
@@ -749,17 +755,6 @@ class LayerNet(LayerNetBase):
                 os.system('git diff >> {:s}.diff'.format(path))
             except:
                 self.printandlog('Saving git diff FAILED!')
-    
-    def calc_metrics(self, ground_truth, label):
-        print(ground_truth.shape)
-        prec = []
-        recall = []
-        dice = []
-        for i in range(ground_truth.shape[1]):
-            prec.append(lfs.calc_precision(ground_truth[:,i,...], label[:,i,...]))
-            recall.append(lfs.calc_recall(ground_truth[:,i,...], label[:,i,...]))
-            dice.append(lfs.calc_dice(ground_truth[:,i,...], label[:,i,...]))
-        return prec, recall, dice
 
     def save_model(self, model='both', pat=''):
         if not self.DEBUG:

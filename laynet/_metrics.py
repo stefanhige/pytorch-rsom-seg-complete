@@ -1,9 +1,11 @@
 import torch
 import warnings
 # from torch import nn
+import scipy.optimize
 import copy 
 import numpy as np
 import math
+import matplotlib.pyplot as plt
 
 def custom_loss_1(pred, target, spatial_weight, class_weight=None):
     '''
@@ -167,7 +169,7 @@ def smoothness_loss(pred, window=5):
     return torch.sum(label_smoothness)    
 
 
-def calc_recall(label, pred):
+def calc_recall(*, label, pred):
     label = label.astype(np.bool)
     pred = pred.astype(np.bool)
     TP = np.sum(np.logical_and(label, pred))
@@ -176,7 +178,8 @@ def calc_recall(label, pred):
     R = TP / (TP + FN)
     return R
 
-def calc_precision(label, pred):
+
+def calc_precision(*, label, pred):
     label = label.astype(np.bool)
     pred = pred.astype(np.bool)
     TP = np.sum(np.logical_and(label, pred))
@@ -185,14 +188,10 @@ def calc_precision(label, pred):
     P = TP / (TP + FP) 
     return P
 
-def calc_dice(a, b):
-    return _dice(a,b)
 
-
-def _dice(x, y):
-    '''
-    do the test in numpy
-    '''
+def _iou(*, label, pred):
+    x = label
+    y = pred
     if isinstance(x, torch.Tensor):
         x = x.cpu().numpy()
     if isinstance(y, torch.Tensor):
@@ -202,6 +201,28 @@ def _dice(x, y):
     y = y.astype(np.bool)
 
     i = np.logical_and(x,y)
+    return i.sum() / np.logical_or(x, y).sum()
+
+
+def calc_dice(a, b):
+    return _dice(a, b)
+
+
+def _dice(*, label, pred):
+    '''
+    do the test in numpy
+    '''
+    x = label
+    y = pred
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().numpy()
+    if isinstance(y, torch.Tensor):
+        y = y.cpu().numpy()
+
+    x = x.astype(np.bool)
+    y = y.astype(np.bool)
+
+    i = np.logical_and(x, y)
 
     if x.sum() + y.sum() == 0:
         print('Dice No True values!')
@@ -211,6 +232,95 @@ def _dice(x, y):
 
 
 
+class MetricCalculator:
+    def __init__(self):
+        self._labels = []
+        self._preds = []
+        self._names = []
+        self._metrics_fn = dict()
+        self._metrics_fn['dice'] = _dice
+        self._metrics_fn['precision'] = calc_precision
+        self._metrics_fn['recall'] = calc_recall
+        self._metrics_fn['IoU'] = _iou
+
+    def register_sample(self, *, label: np.ndarray, prediction: np.ndarray, name: str):
+        self._labels.append(label)
+        self._preds.append(prediction)
+        self._names.append(name)
+
+    # define function to optimize: 1 - metric
+    def _optim_fun(self, p: float, metric: str = 'dice'):
+        results = self.calculate(p)
+        return 1 - results['summary'][metric]['mean']
+
+    def optimize(self, metric: str = 'dice'):
+        if metric != 'dice':
+            raise NotImplementedError
+
+        res = scipy.optimize.minimize_scalar(self._optim_fun, bounds=(0, 1), method='bounded')
+        plot = True
+        if plot:
+            # debug: produce plot showing x vs dice
+            x_vec = np.linspace(0, 1, num=200)
+            y_vec = np.vectorize(self._optim_fun)(x_vec)
+            y_vec = 1 - y_vec  # dice score not dice loss
+
+            fig, ax = plt.subplots()
+            ax.plot(x_vec, y_vec)
+
+            # ax.set_yscale('log')
+            ax.set(xlabel='threshold', ylabel='dice')
+            ax.grid()
+
+        # return ideal p
+        return res.x
+
+    def calculate(self, p: float, metrics_fns=None):
+        if metrics_fns is None:
+            metrics_fns = self._metrics_fn
+
+        results = dict()
+        for label, pred, name in zip(self._labels, self._preds, self._names):
+            for key, metric_fn in metrics_fns.items():
+                score = metric_fn(label=label, pred=pred >= p)
+                if key not in results:
+                    results[key] = [(name, score)]
+                else:
+                    results[key].append((name, score))
+
+        results = self._average(results)
+        return results
+
+    @staticmethod
+    def _average(results):
+        summary = dict()
+        for metric_name, values in results.items():
+            metric_list = []
+            for _, value in values:
+                metric_list.append(value)
+
+            summary[metric_name] = dict()
+            summary[metric_name]['mean'] = np.mean(metric_list)
+            summary[metric_name]['std'] = np.std(metric_list)
+
+        results['summary'] = summary
+        return results
+
+
+
+
+
+if __name__ == '__main__':
+
+
+    mC = MetricCalculator()
+    for _ in range(5):
+        a = np.random.rand(10, 10)
+        b = np.random.rand(10, 10)
+        mC.register_sample(label=a, prediction=b, name="bla0")
+    results = mC.calculate(p=0.5)
+
+    p_ideal = mC.optimize()
 
 
 
