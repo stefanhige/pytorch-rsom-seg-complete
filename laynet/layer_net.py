@@ -21,7 +21,7 @@ from scipy import ndimage
 from ._model import UNet, Fcn
 import laynet._metrics as lfs #lfs=lossfunctions
 from ._dataset import RsomLayerDataset, \
-                      RandomZShift, CropToEven, RandomMirror, IntensityTransform, \
+                      RandomZShift, RandomZRescale, CropToEven, RandomMirror, IntensityTransform, \
                       ToTensor, to_numpy
 from utils import save_nii
 from ._metrics import MetricCalculator
@@ -495,6 +495,7 @@ class LayerNet(LayerNetBase):
                                               batch_size=batch_size,
                                               sliding_window_size=self.aug_params.sliding_window_size,
                                               transform=transforms.Compose([
+                                                  RandomZRescale(p=1, range=(0.6, 1.5)),
                                                   RandomZShift(max_shift=self.aug_params.zshift),
                                                   RandomMirror(),
                                                   CropToEven(network_depth=self.model_depth),

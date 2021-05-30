@@ -253,24 +253,26 @@ class MetricCalculator:
         results = self.calculate(p)
         return 1 - results['summary'][metric]['mean']
 
+    def plot_dice(self, fname: str):
+        # debug: produce plot showing x vs dice
+        x_vec = np.linspace(0, 1, num=200)
+        y_vec = np.vectorize(self._optim_fun)(x_vec)
+        y_vec = 1 - y_vec  # dice score not dice loss
+
+        fig, ax = plt.subplots()
+        ax.plot(x_vec, y_vec)
+
+        # ax.set_yscale('log')
+        ax.set(xlabel='threshold', ylabel='dice')
+        ax.grid()
+        plt.savefig(fname)
+
+
     def optimize(self, metric: str = 'dice'):
         if metric != 'dice':
             raise NotImplementedError
 
         res = scipy.optimize.minimize_scalar(self._optim_fun, bounds=(0, 1), method='bounded')
-        plot = True
-        if plot:
-            # debug: produce plot showing x vs dice
-            x_vec = np.linspace(0, 1, num=200)
-            y_vec = np.vectorize(self._optim_fun)(x_vec)
-            y_vec = 1 - y_vec  # dice score not dice loss
-
-            fig, ax = plt.subplots()
-            ax.plot(x_vec, y_vec)
-
-            # ax.set_yscale('log')
-            ax.set(xlabel='threshold', ylabel='dice')
-            ax.grid()
 
         # return ideal p
         return res.x
