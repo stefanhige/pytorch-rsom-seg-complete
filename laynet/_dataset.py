@@ -3,11 +3,9 @@ import scipy.ndimage
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import tempfile
 
 import shutil
 import os
-import copy
 import time
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
@@ -45,6 +43,7 @@ class RsomLayerDataset(Dataset):
                  batch_size=2,
                  sliding_window_size=5,
                  training=True,
+                 deterministic=False,
                  transform=None):
 
         super().__init__()
@@ -91,6 +90,10 @@ class RsomLayerDataset(Dataset):
             # generate lists for batch size
             self.npz_data_x = np.asarray(self.npz_data_x)
             self.npz_data_y = np.asarray(self.npz_data_y)
+
+            if deterministic:
+                torch.manual_seed(23)
+                np.random.seed(15)
 
             self.npz_data_x = self.npz_data_x[torch.randperm(len(self.npz_data_x)).numpy()]
             self.npz_data_y = self.npz_data_y[torch.randperm(len(self.npz_data_y)).numpy()]
@@ -347,7 +350,82 @@ class RsomLayerDataset(Dataset):
 
 
 class RandomZRescale:
-    pass
+    def __init__(self, p=0.5, range=(0.6, 1.5)):
+        self.p = p
+        self.range = range
+
+    def rescale_one(self, data, label, scale):
+        # find epidermis z-coords
+        z_proj = np.amax(label, axis=1)
+        nz = np.nonzero(z_proj)
+        epidermis_start = nz[0][0]
+        epidermis_end = nz[0][-1]
+        data_chunks = []
+        label_chunks = []
+
+        data_chunks.append(data[:epidermis_start, :])
+        label_chunks.append(label[:epidermis_start, :])
+
+        # data_chunks.append(skimage.transform.rescale(data[epidermis_start:epidermis_end, :],
+        #                                              scale=(scale, 1, 1),
+        #                                              order=1  # bi-linear
+        #                                              ))
+
+        data_chunks.append(scipy.ndimage.zoom(data[epidermis_start:epidermis_end, :],
+                                              zoom=(scale, 1, 1),
+                                              order=1))
+
+        # label_chunks.append(skimage.transform.rescale(label[epidermis_start:epidermis_end, :],
+        #                                               order=0,  # nearest neighbor
+        #                                               scale=(scale, 1),
+        #                                               preserve_range=True))
+
+        label_chunks.append(scipy.ndimage.zoom(label[epidermis_start:epidermis_end, :],
+                                               zoom=(scale, 1),
+                                               order=0))
+
+        data_chunks.append(data[epidermis_end:, ...])
+        label_chunks.append(label[epidermis_end:, ...])
+
+        sum_z = sum([el.shape[0] for el in label_chunks])
+
+        if sum_z > 500:
+            data_chunks[-1] = data_chunks[-1][:-(sum_z - 500), ...]
+            label_chunks[-1] = label_chunks[-1][:-(sum_z - 500), ...]
+        else:
+            data_chunks.append(np.zeros((500 - sum_z, data.shape[1], data.shape[2]), dtype=data.dtype))
+            label_chunks.append(np.zeros((500 - sum_z, label.shape[1]), dtype=label.dtype))
+
+        data = np.concatenate(data_chunks, axis=0)
+        label = np.concatenate(label_chunks, axis=0)
+
+        assert data.shape[0] == 500
+        assert label.shape[0] == 500
+
+        return data, label
+
+
+    def __call__(self, sample):
+        data, label, meta = sample['data'], sample['label'], sample['meta']
+        assert isinstance(data, np.ndarray)
+        assert isinstance(label, np.ndarray)
+        # data still is RGB
+        assert data.shape[3] == 3
+        assert data.shape[1] == 500
+        assert label.shape[1] == 500
+
+        rand_vec = torch.rand(data.shape[0]).numpy()
+
+        for idx in range(len(rand_vec)):
+            if rand_vec[idx] <= self.p:
+            #if True:
+                # sample scale
+                scale = torch.rand(1).numpy()*(self.range[1] - self.range[0]) + self.range[0]
+                scale = scale[0]
+                print(f"{scale=}")
+                data[idx, ...], label[idx, ...] = self.rescale_one(data[idx, ...], label[idx, ...], scale=scale)
+
+        return {'data': np.ascontiguousarray(data.astype(np.uint8)), 'label': np.ascontiguousarray(label), 'meta': meta}
 
 
 class RandomMirror:
@@ -677,21 +755,42 @@ def show(element, idx=0):
 
     plt.figure()
     plt.imshow(data[idx, ...])
+    plt.figure()
+    plt.imshow(element['label'][idx, ...], cmap='Greys')
 
 
 if __name__ == '__main__':
-    dataset_train = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile',
+    dataset_train = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile2',
                                      training=True,
                                      sliding_window_size=3,
                                      transform=transforms.Compose([
-                                         RandomZShift(max_shift=0),
-                                         RandomMirror(),
-                                         CropToEven(network_depth=5),
-                                         IntensityTransform(),
-                                         ToTensor()])
+                                         RandomZRescale(p=1, range=(0.6, 1.5))])
+                                         #RandomZShift(max_shift=0),
+                                         #RandomMirror(),
+                                         #CropToEven(network_depth=5),
+                                         #IntensityTransform(),
+                                         #ToTensor()])
                                      )
 
     el_train = dataset_train[0]
+    print(dataset_train.npz_batches[0])
+    show(el_train, 0)
+
+    dataset_train = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile2',
+                                     training=True,
+                                     sliding_window_size=3,
+                                     transform=transforms.Compose([
+                                         RandomZRescale(p=1, range=(0.6, 1.5))])
+                                         #RandomZShift(max_shift=0),
+                                         #RandomMirror(),
+                                         #CropToEven(network_depth=5),
+                                         #IntensityTransform(),
+                                         #ToTensor()])
+                                     )
+
+    el_train = dataset_train[0]
+    print(dataset_train.npz_batches[0])
+    show(el_train, 0)
 
 
     #RsomLayerDataset.save_nii(el_train, './')
@@ -700,6 +799,7 @@ if __name__ == '__main__':
     if 1:
         dataset_test = RsomLayerDataset(root_dir='/home/stefan/RSOM/testing/onefile',
                                         training=False,
+                                        deterministic=True,
                                         transform=transforms.Compose([
                                             CropToEven(network_depth=5),
                                             IntensityTransform(),
