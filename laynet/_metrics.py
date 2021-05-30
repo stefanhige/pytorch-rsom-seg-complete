@@ -249,13 +249,13 @@ class MetricCalculator:
         self._names.append(name)
 
     # define function to optimize: 1 - metric
-    def _optim_fun(self, p: float, metric: str = 'dice'):
-        results = self.calculate(p)
-        return 1 - results['summary'][metric]['mean']
+    def _optim_fun(self, p: float):
+        results = self.calculate(p, metrics_fns={'dice': self._metrics_fn['dice']})
+        return 1 - results['summary']['dice']['mean']
 
     def plot_dice(self, fname: str):
         # debug: produce plot showing x vs dice
-        x_vec = np.linspace(0, 1, num=200)
+        x_vec = np.linspace(0, 1, num=100)
         y_vec = np.vectorize(self._optim_fun)(x_vec)
         y_vec = 1 - y_vec  # dice score not dice loss
 

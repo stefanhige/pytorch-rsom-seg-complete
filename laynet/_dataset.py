@@ -422,7 +422,7 @@ class RandomZRescale:
                 # sample scale
                 scale = torch.rand(1).numpy()*(self.range[1] - self.range[0]) + self.range[0]
                 scale = scale[0]
-                print(f"{scale=}")
+                # print(f"{scale=}")
                 data[idx, ...], label[idx, ...] = self.rescale_one(data[idx, ...], label[idx, ...], scale=scale)
 
         return {'data': np.ascontiguousarray(data.astype(np.uint8)), 'label': np.ascontiguousarray(label), 'meta': meta}

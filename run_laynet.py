@@ -12,14 +12,15 @@ if mode == 'train':
     sdesc = []
     sliding_window_size = []
     for i in [1, 3, 5, 9]:
-        sdesc.append("slid_mip" + str(i))
+        sdesc.append("_slid_mip" + str(i))
         sliding_window_size.append(i)
 
 
 
     # root_dir = '/home/stefan/RSOM/testing/onefile'
     # root_dir = '/home/gerlstefan/data/layerunet/dataloader_dev'
-    root_dir = '/home/gerlstefan/data/layerunet/fullDataset/labeled'
+    root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled'
+    # root_dir = '/home/gerlstefan/data/layerunet/fullDataset/labeled'
     DEBUG = False
     # DEBUG = True
 
@@ -58,11 +59,10 @@ if mode == 'train':
                         dirs=dirs,
                         optimizer='Adam',
                         initial_lr=1e-4,
-                        scheduler_patience=3,
+                        scheduler_patience=5,
                         lossfn=torch.nn.BCEWithLogitsLoss(reduction='sum'),
                         epochs=20,
                         dropout=True,
-                        class_weight=None,
                         DEBUG=DEBUG,
                         batch_size=6,
                         decision_boundary=0.5
@@ -73,6 +73,20 @@ if mode == 'train':
         net1.train_all_epochs()
         net1.predict()
         net1.save_model()
+        net1.calc_metrics()
+
+        # metrics on "best model"
+        net1.model.load_state_dict(net1.best_model)
+        net1.printandlog("")
+        net1.printandlog("=================================================")
+        net1.printandlog("Metrics from 'best' model")
+        net1.out_pred_dir = net1.out_pred_dir + '_best_on_eval'
+        os.mkdir(net1.out_pred_dir)
+        net1.predict(save=True)
+        net1.calc_metrics()
+        net1.metricCalculator.plot_dice(os.path.join(net1.dirs['out'],'thvsdice.png'))
+
+        # break
 
 elif mode == 'predict':
 
