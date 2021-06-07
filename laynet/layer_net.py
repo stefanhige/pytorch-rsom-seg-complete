@@ -495,7 +495,7 @@ class LayerNet(LayerNetBase):
                                               batch_size=batch_size,
                                               sliding_window_size=self.aug_params.sliding_window_size,
                                               transform=transforms.Compose([
-                                                  RandomZRescale(p=1, range=(0.6, 1.5)),
+                                                  RandomZRescale(p=0.3, range=(0.6, 1.4)),
                                                   RandomZShift(max_shift=self.aug_params.zshift),
                                                   RandomMirror(),
                                                   CropToEven(network_depth=self.model_depth),

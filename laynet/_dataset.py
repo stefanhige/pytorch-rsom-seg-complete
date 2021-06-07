@@ -384,23 +384,36 @@ class RandomZRescale:
                                                zoom=(scale, 1),
                                                order=0))
 
-        data_chunks.append(data[epidermis_end:, ...])
-        label_chunks.append(label[epidermis_end:, ...])
+        # only append if we are still smaller than 500
+        if sum([el.shape[0] for el in label_chunks]) < 500:
+            data_chunks.append(data[epidermis_end:, ...])
+            label_chunks.append(label[epidermis_end:, ...])
 
         sum_z = sum([el.shape[0] for el in label_chunks])
 
         if sum_z > 500:
             data_chunks[-1] = data_chunks[-1][:-(sum_z - 500), ...]
             label_chunks[-1] = label_chunks[-1][:-(sum_z - 500), ...]
-        else:
+        elif sum_z < 500:
             data_chunks.append(np.zeros((500 - sum_z, data.shape[1], data.shape[2]), dtype=data.dtype))
             label_chunks.append(np.zeros((500 - sum_z, label.shape[1]), dtype=label.dtype))
 
         data = np.concatenate(data_chunks, axis=0)
         label = np.concatenate(label_chunks, axis=0)
+        try:
+            assert data.shape[0] == 500
+            assert label.shape[0] == 500
+        except Exception as e:
+            print(scale)
+            print(e)
+            print(data.shape)
+            print(label.shape)
+            for el in data_chunks:
+                print(el.shape)
+            for el in label_chunks:
+                print(el.shape)
+            
 
-        assert data.shape[0] == 500
-        assert label.shape[0] == 500
 
         return data, label
 

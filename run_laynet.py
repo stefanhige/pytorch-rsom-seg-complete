@@ -12,7 +12,7 @@ if mode == 'train':
     sdesc = []
     sliding_window_size = []
     for i in [1, 3, 5, 9]:
-        sdesc.append("_slid_mip" + str(i))
+        sdesc.append("_45s_slid_mip" + str(i))
         sliding_window_size.append(i)
 
 
@@ -20,6 +20,7 @@ if mode == 'train':
     # root_dir = '/home/stefan/RSOM/testing/onefile'
     # root_dir = '/home/gerlstefan/data/layerunet/dataloader_dev'
     root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled'
+    # root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled_reduced_intensity'
     # root_dir = '/home/gerlstefan/data/layerunet/fullDataset/labeled'
     DEBUG = False
     # DEBUG = True
@@ -47,7 +48,7 @@ if mode == 'train':
               'out': out_dir}
 
         aug_params = types.SimpleNamespace()
-        aug_params.zshift = (-50, 200)
+        aug_params.zshift = (-50, 100)
         aug_params.sliding_window_size = sliding_window_size[idx]
 
 
@@ -74,6 +75,7 @@ if mode == 'train':
         net1.predict()
         net1.save_model()
         net1.calc_metrics()
+        net1.metricCalculator.plot_dice(os.path.join(net1.dirs['out'],'thvsdice_last.png'))
 
         # metrics on "best model"
         net1.model.load_state_dict(net1.best_model)
@@ -84,22 +86,22 @@ if mode == 'train':
         os.mkdir(net1.out_pred_dir)
         net1.predict(save=True)
         net1.calc_metrics()
-        net1.metricCalculator.plot_dice(os.path.join(net1.dirs['out'],'thvsdice.png'))
+        net1.metricCalculator.plot_dice(os.path.join(net1.dirs['out'],'thvsdice_best.png'))
 
         # break
 
 elif mode == 'predict':
 
-    os.environ["CUDA_VISIBLE_DEVICES"]='4'
+    os.environ["CUDA_VISIBLE_DEVICES"]='7'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #device = torch.device('cpu')
    
-    pred_dir = '/home/stefan/RSOM/testing/onefile'
+    pred_dir = '/home/gerlstefan/data/layerunet/output/210602-01-predict-new-labels/input'
 
     # model_dir ='/home/gerlstefan/models/layerseg/test/mod_191101_depth5.pt'
-    model_dir ='/home/stefan/RSOM/testing/output/210524-03-test/mod210524-03_best_.pt'
+    model_dir ='/home/gerlstefan/data/layerunet/output/210531-00-_slid_mip5/mod210531-00_last_.pt'
 
-    out_dir ='/home/stefan/RSOM/testing/output'
+    out_dir ='/home/gerlstefan/data/layerunet/output/210602-01-predict-new-labels'
     model_type = 'unet'
     
     net1 = LayerNetBase(
@@ -107,12 +109,11 @@ elif mode == 'predict':
                   'pred': pred_dir,
                   'out': out_dir},
             device=device,
-            model_depth=1,
-            batch_size=2,
+            model_depth=5,
+            sliding_window_size=5,
+            batch_size=6,
             model_type=model_type)
     net1.predict()
 
-
-
-
-
+    with open(os.path.join(out_dir, 'MODEL.txt'), 'w') as fd:
+        fd.write(model_dir)
