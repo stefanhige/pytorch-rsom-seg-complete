@@ -7,6 +7,7 @@ import json
 import warnings
 from timeit import default_timer as timer
 import nibabel as nib
+import concurrent.futures
 
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ from ._model import UNet, Fcn
 import laynet._metrics as lfs #lfs=lossfunctions
 from ._dataset import RsomLayerDataset, \
                       RandomZShift, RandomZRescale, CropToEven, RandomMirror, IntensityTransform, \
-                      ToTensor, to_numpy
+                      ToTensor, to_numpy, timing
 from utils import save_nii
 from ._metrics import MetricCalculator
 
@@ -115,7 +116,94 @@ class LayerNetBase:
         self.printandlog("Metrics of eval set:")
         self.printandlog(json.dumps(results, indent=2))
 
-    def predict(self, model=None, save=True):
+    @timing
+    def predict(self, model=None, save_all=True):
+        self.metricCalculator = MetricCalculator()
+
+        if model is None:
+            model = self.model.eval()
+
+        iterator = iter(self.pred_dataloader)
+        futs = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            for i in range(len(self.pred_dataset)):
+                # get the next volume to evaluate
+                batch = next(iterator)
+
+                prob_list = []
+                for subsample in batch:
+                    prediction = self._predict_one(batch=subsample, model=model)
+                    # print(f'{prediction.shape=}')
+                    prob_list.append((to_numpy(prediction, subsample['meta']), subsample['meta']))
+
+                # save the single probabilities
+                for el in prob_list:
+                    data, meta = el
+                    if save_all:
+                        futs.append(executor.submit(self._save_nii,
+                                                    data,
+                                                    meta=meta,
+                                                    fstr='ppred.nii.gz'))
+                        futs.append(executor.submit(self._save_nii,
+                                                    data >= self.decision_boundary,
+                                                    meta=meta,
+                                                    fstr='pred.nii.gz'))
+
+                # save combined one
+                assert (len(prob_list) == 2)
+                combined = (prob_list[0][0] + prob_list[1][0]) / 2
+
+                if save_all:
+                    futs.append(executor.submit(self._save_nii,
+                                                combined,
+                                                meta=meta,
+                                                combined=True,
+                                                fstr='ppred.nii.gz'))
+
+                boolean_combined = combined >= self.decision_boundary
+                futs.append(executor.submit(self._save_nii,
+                                            boolean_combined,
+                                            meta=meta,
+                                            combined=True,
+                                            fstr='pred.nii.gz'))
+                futs.append(executor.submit(self.postprocess_layerseg,
+                                            boolean_combined,
+                                            meta=meta,
+                                            combined=True,
+                                            fstr='preds.nii.gz'
+                                            ))
+                # print(f"{batch[0]['label'].shape=}")
+
+                # batch[0] and batch[1] have the same label
+                self.metricCalculator.register_sample(
+                    label=to_numpy(torch.squeeze(batch[0]['label'], dim=0), batch[0]['meta']),
+                    prediction=combined,
+                    name=os.path.basename(meta['filename'][0]))
+
+            for _ in concurrent.futures.as_completed(futs):
+                pass
+
+    def postprocess_layerseg(self, vol, meta, combined, fstr):
+        vol_shape = vol.shape
+        structure = ndimage.generate_binary_structure(3, 2)
+
+        pad_width = 6
+        closing_iter1 = 5
+        closing_iter2 = 1
+        assert pad_width == closing_iter1 + closing_iter2
+
+        vol = np.pad(vol, pad_width=pad_width, mode='edge')
+        vol = ndimage.binary_closing(vol, structure=structure, iterations=closing_iter1, border_value=0)
+        vol = ndimage.binary_opening(vol, structure=structure, iterations=5, border_value=0)
+        vol = ndimage.binary_closing(vol, structure=structure, iterations=closing_iter2, border_value=0)
+        vol = vol[pad_width:-pad_width, pad_width:-pad_width, pad_width:-pad_width]
+
+        assert vol_shape == vol.shape
+
+        self._save_nii(vol, meta, combined, fstr)
+
+    @timing
+    def _predict(self, model=None, save=True):
         self.metricCalculator = MetricCalculator()
 
         if model is None:
