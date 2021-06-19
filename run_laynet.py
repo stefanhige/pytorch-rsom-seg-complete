@@ -1,7 +1,7 @@
 
 import torch
 import os
-from laynet._metrics import custom_loss_1_smooth, bce_and_smooth, LossScheduler
+from laynet._metrics import smoothness_loss_new, LossScheduler
 from laynet import LayerNet, LayerNetBase
 
 import types
@@ -12,14 +12,17 @@ if mode == 'train':
     
     sdesc = []
     sliding_window_size = []
+    unet_wf = []
     class_weights = []
     
     i = 5
-    for i in [1, 5, 9]:
-        sdesc.append("50s_slid_mip" + str(i) + '_20ep')
-        sliding_window_size.append(i)
+    for i in [3, 4, 5]:
+        # sdesc.append("50s_slid_mip" + str(i) + '_20ep')
+        # sliding_window_size.append(i)
 
-
+        sdesc.append("50s_slid_mip_5_unetwf_" + str(i))
+        unet_wf.append(i)
+        # sliding_window_size.append(i)
 
 
     # root_dir = '/home/stefan/RSOM/testing/onefile'
@@ -33,15 +36,16 @@ if mode == 'train':
 
     out_dir = '/home/gerlstefan/data/layerunet/output'
 
-    model_type = 'unet'
 
-    os.environ["CUDA_VISIBLE_DEVICES"]='7'
+    os.environ["CUDA_VISIBLE_DEVICES"]='5'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for idx in range(len(sdesc)):
         # train_dir = root_dir
         # eval_dir = root_dir
+
+        model_type = {'type': 'unet', 'wf': unet_wf[idx]}
 
         train_dir = os.path.join(root_dir, 'train')
         eval_dir = os.path.join(root_dir, 'val')
@@ -50,18 +54,22 @@ if mode == 'train':
         dirs={'train': train_dir,
               'eval': eval_dir,
               'model':'',
+              # 'model':'/home/gerlstefan/data/layerunet/output/210616-00-50s_slid_mip5_10ep/mod210616-00_last_.pt',
               'pred': pred_dir,
               'out': out_dir}
 
         aug_params = types.SimpleNamespace()
         aug_params.zshift = (-75, 100)
-        aug_params.sliding_window_size = sliding_window_size[idx]
+        # aug_params.sliding_window_size = sliding_window_size[idx]
+        aug_params.sliding_window_size = 5
 
         # loss_scheduler = LossScheduler(base_loss=torch.nn.BCEWithLogitsLoss(reduction='sum'),
-        #                                additional_loss=torch.nn.BCEWithLogitsLoss(reduction='sum'),
-        #                                epoch_start=1,
-        #                                factor=1.5,
-                                       # n_epochs=2)
+        #                                additional_loss=smoothness_loss_new,
+        #                                epoch_start=10,
+        #                                add_base_factor=add_base_factor[idx],
+        #                                factor=2,
+        #                                n_epochs=5,
+        #                                )
 
 
         net1 = LayerNet(device=device,

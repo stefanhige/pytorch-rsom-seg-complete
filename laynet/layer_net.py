@@ -24,7 +24,7 @@ from ._dataset import RsomLayerDataset, \
                       RandomZShift, RandomZRescale, CropToEven, RandomMirror, IntensityTransform, \
                       ToTensor, to_numpy
 from utils import save_nii
-from ._metrics import MetricCalculator
+from ._metrics import MetricCalculator, smoothness_loss_new
 
 class LayerNetBase:
     """
@@ -80,16 +80,17 @@ class LayerNetBase:
         self.args.non_blocking = True
 
         # MODEL
-        if model_type == 'unet':
+        if model_type['type'] == 'unet':
             self.model = UNet(in_channels=2,
-                            n_classes=1,
-                            depth=model_depth,
-                            wf=6,
-                            padding=True,
-                            batch_norm=True,
-                            up_mode='upconv',
-                            dropout=dropout)
-        elif model_type =='fcn':
+                              n_classes=1,
+                              depth=model_depth,
+                              wf=model_type['wf'],
+                              padding=True,
+                              batch_norm=True,
+                              up_mode='upconv',
+                              dropout=dropout)
+        elif model_type['type'] =='fcn':
+            
             self.model = Fcn()
         else:
             raise NotImplementedError
@@ -647,6 +648,7 @@ class LayerNet(LayerNetBase):
 
         print('finished training.')
     
+
     def train(self, iterator, epoch):
         self.model.train()
         for i in range(len(self.train_dataset)):
@@ -679,6 +681,9 @@ class LayerNet(LayerNetBase):
             # prediction = prediction.to('cpu')
             if self.loss_scheduler is None:
                 loss = self.lossfn(input=prediction, target=label)
+                # self.debug(f"{loss=}")
+                # sloss = smoothness_loss_new(prediction)
+                # self.debug(f"{sloss=}")
             else:
                 loss = self.loss_scheduler.loss(input=prediction, target=label)
                     
