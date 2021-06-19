@@ -308,8 +308,36 @@ class MetricCalculator:
         results['summary'] = summary
         return results
 
+class LossScheduler:
+    def __init__(self,
+                 base_loss=None,
+                 additional_loss=None,
+                 epoch_start=1,
+                 factor=1,
+                 n_epochs=1):
+        self._epoch_start = epoch_start
+        self._factor = factor
+        
+        # first epoch, factor is 1
+        self._n_epochs = n_epochs - 1
 
+        self._curr_epoch = -1
+        self._base_loss = base_loss
+        self._additional_loss = additional_loss
+        self.increase_epoch()
 
+    def increase_epoch(self):
+        self._curr_epoch += 1
+        self._diff_epoch = self._curr_epoch - self._epoch_start
+    
+    def loss(self, input, target):
+        if self._diff_epoch >= 0:
+            exp = min(self._n_epochs, self._diff_epoch)
+            print("increase loss", self._factor**exp)
+            return self._base_loss(input=input, target=target) + \
+                    (self._factor**exp)*self._additional_loss(input=input, target=target)
+        else:
+            return self._base_loss(input=input, target=target)
 
 
 if __name__ == '__main__':

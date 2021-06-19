@@ -1,8 +1,9 @@
 
 import torch
 import os
-from laynet._metrics import custom_loss_1_smooth, bce_and_smooth
+from laynet._metrics import custom_loss_1_smooth, bce_and_smooth, LossScheduler
 from laynet import LayerNet, LayerNetBase
+
 import types
 # torch.backends.cudnn.benchmark = True
 mode = 'train'
@@ -11,15 +12,20 @@ if mode == 'train':
     
     sdesc = []
     sliding_window_size = []
-    for i in [1, 3, 5, 9]:
-        sdesc.append("_45s_slid_mip" + str(i))
+    class_weights = []
+    
+    i = 5
+    for i in [1, 5, 9]:
+        sdesc.append("50s_slid_mip" + str(i) + '_20ep')
         sliding_window_size.append(i)
+
 
 
 
     # root_dir = '/home/stefan/RSOM/testing/onefile'
     # root_dir = '/home/gerlstefan/data/layerunet/dataloader_dev'
-    root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled'
+    # root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled'
+    root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled_fixed'
     # root_dir = '/home/gerlstefan/data/layerunet/fullDatasetExtended/labeled_reduced_intensity'
     # root_dir = '/home/gerlstefan/data/layerunet/fullDataset/labeled'
     DEBUG = False
@@ -48,8 +54,14 @@ if mode == 'train':
               'out': out_dir}
 
         aug_params = types.SimpleNamespace()
-        aug_params.zshift = (-50, 100)
+        aug_params.zshift = (-75, 100)
         aug_params.sliding_window_size = sliding_window_size[idx]
+
+        # loss_scheduler = LossScheduler(base_loss=torch.nn.BCEWithLogitsLoss(reduction='sum'),
+        #                                additional_loss=torch.nn.BCEWithLogitsLoss(reduction='sum'),
+        #                                epoch_start=1,
+        #                                factor=1.5,
+                                       # n_epochs=2)
 
 
         net1 = LayerNet(device=device,
@@ -62,6 +74,8 @@ if mode == 'train':
                         initial_lr=1e-4,
                         scheduler_patience=5,
                         lossfn=torch.nn.BCEWithLogitsLoss(reduction='sum'),
+                            # pos_weight=torch.Tensor([class_weights[idx]]).to(device)),
+                        # loss_scheduler=loss_scheduler,
                         epochs=20,
                         dropout=True,
                         DEBUG=DEBUG,

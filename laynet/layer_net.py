@@ -490,7 +490,8 @@ class LayerNet(LayerNetBase):
                  DEBUG = False,
                  decision_boundary=0.5,
                  batch_size=1,
-                 aug_params=None
+                 aug_params=None,
+                 loss_scheduler=None
                  ):
 
         super().__init__(dirs=dirs,
@@ -505,6 +506,7 @@ class LayerNet(LayerNetBase):
 
         self.aug_params = aug_params
         self.sdesc = sdesc
+        self.loss_scheduler = loss_scheduler
 
         self.LOG = True
 
@@ -714,6 +716,8 @@ class LayerNet(LayerNetBase):
             
             # use ReduceLROnPlateau scheduler
             self.scheduler.step(curr_loss)
+            if self.loss_scheduler is not None:
+                self.loss_scheduler.increase_epoch()
             
             if curr_loss < self.best_loss:
                 self.best_loss = copy.deepcopy(curr_loss)
@@ -761,7 +765,10 @@ class LayerNet(LayerNetBase):
 
             # move back to save memory
             # prediction = prediction.to('cpu')
-            loss = self.lossfn(input=prediction, target=label)
+            if self.loss_scheduler is None:
+                loss = self.lossfn(input=prediction, target=label)
+            else:
+                loss = self.loss_scheduler.loss(input=prediction, target=label)
                     
             self.optimizer.zero_grad()
             loss.backward()
@@ -827,7 +834,10 @@ class LayerNet(LayerNetBase):
 
             prediction = self.model(data)
 
-            loss = self.lossfn(input=prediction, target=label)
+            if self.loss_scheduler is None:
+                loss = self.lossfn(input=prediction, target=label)
+            else:
+                loss = self.loss_scheduler.loss(input=prediction, target=label)
 
             # loss running variable
             # add value for every minibatch
