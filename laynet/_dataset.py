@@ -20,6 +20,7 @@ def timing(func):
         res = func(*arg, **kw)
         t2 = time.time()
         print(func.__name__, 'took', t2 - t1, 's')
+        return res
 
     return wrapper
 
