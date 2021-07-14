@@ -20,6 +20,7 @@ def timing(func):
         res = func(*arg, **kw)
         t2 = time.time()
         print(func.__name__, 'took', t2 - t1, 's')
+        return res
 
     return wrapper
 
@@ -237,13 +238,11 @@ class RsomLayerDataset(Dataset):
             img_label = nib.Nifti1Image(label, np.eye(4))
             nib.save(img_label, filename.replace('.nii.gz', '_' + str(idx) + '_l.nii.gz'))
 
-
     def __len__(self):
         if self.training:
             return len(self.npz_batches)
         else:
             return len(self.data)
-
 
     def _getitem_train(self, idx):
         data = []
@@ -400,21 +399,9 @@ class RandomZRescale:
 
         data = np.concatenate(data_chunks, axis=0)
         label = np.concatenate(label_chunks, axis=0)
-        try:
-            assert data.shape[0] == 500
-            assert label.shape[0] == 500
-        except Exception as e:
-            print(scale)
-            print(e)
-            print(data.shape)
-            print(label.shape)
-            for el in data_chunks:
-                print(el.shape)
-            for el in label_chunks:
-                print(el.shape)
-            
-
-
+        assert data.shape[0] == 500
+        assert label.shape[0] == 500
+        
         return data, label
 
 
