@@ -6,7 +6,7 @@ Created on Mon May  6 16:44:10 2019
 @author: sgerl
 """
 from pathlib import Path
-
+import scipy.ndimage
 import os
 
 import scipy.io as sio
@@ -29,6 +29,7 @@ import nibabel as nib
 from skimage import exposure
 from skimage import morphology
 from skimage import transform
+
 
 # CLASS FOR ONE DATASET
 class RSOM():
@@ -100,6 +101,11 @@ class RSOM():
             print(('WARNING: Could not load surface data, placing None type in'
                    'surface file. Method flatSURFACE is not going to be applied!!'))
             self.matfileSURF = None
+
+    def save_matlab(self, output_dir, fstr='Crop'):
+        sio.savemat(os.path.join(output_dir, os.path.basename(self.file.LF).replace('LF.mat', f'_{fstr}LF.mat')), self.matfileLF)
+        sio.savemat(os.path.join(output_dir, os.path.basename(self.file.HF).replace('HF.mat', f'_{fstr}HF.mat')), self.matfileHF)
+
         
     def flat_surface(self):
         '''
@@ -151,8 +157,8 @@ class RSOM():
                     
                     offs = int(-np.around(Sip[i, j]/2))
                     
-                    self.Vl[:, i, j] = np.roll(self.Vl[:, i, j], offs);
-                    self.Vh[:, i, j] = np.roll(self.Vh[:, i, j], offs);
+                    self.Vl[:, i, j] = np.roll(self.Vl[:, i, j], offs)
+                    self.Vh[:, i, j] = np.roll(self.Vh[:, i, j], offs)
                     
                     # replace values rolled inside epidermis with zero
                     if offs < 0:
@@ -186,6 +192,19 @@ class RSOM():
         fig.colorbar(surf, shrink=0.5, aspect=5)
 
         plt.show()
+
+    def sliding_window_mip(self, size, axis=1):
+        """
+
+        Args:
+            size:
+            axis: 1 or 2
+
+        Returns:
+
+        """
+        self.Vl_1 = scipy.ndimage.maximum_filter1d(self.Vl_1, size, axis=axis)
+        self.Vh_1 = scipy.ndimage.maximum_filter1d(self.Vh_1, size, axis=axis)
         
     def norm_intensity(self):
         '''
@@ -200,19 +219,28 @@ class RSOM():
         self.Vl_1[self.Vl_1 < 0] = 0
         self.Vh_1[self.Vh_1 < 0] = 0
         
-    def rescale_intensity(self, dynamic_rescale = False):
+    def rescale_intensity(self, reduced_intensity=False):
         '''
         rescale intensities, quadratic transform, crop values
         '''
-        self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0, 0.2))
-        self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0, 0.1))
+        print(f"{reduced_intensity=}")
+        if not reduced_intensity:
+            self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0, 0.2))
+            self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0, 0.1))
+        else:
+            self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0, 0.3))
+            self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0, 0.15))
         
         self.Vl_1 = self.Vl_1**2
         self.Vh_1 = self.Vh_1**2
-        
-        self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0.05, 1))
-        self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0.02, 1))
-        
+
+        if not reduced_intensity:
+            self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0.05, 1))
+            self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0.02, 1))
+        else:
+            self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0.03, 1))
+            self.Vh_1 = exposure.rescale_intensity(self.Vh_1, in_range = (0.02, 1))
+
     def calc_mip(self, axis = 1, do_plot = True, cut_z=0):
         '''
         plot maximum intensity projection along specified axis
@@ -696,7 +724,16 @@ class RSOM():
                                    '.nii.gz')).resolve()
         print(str(nii_file))
         nib.save(img, str(nii_file))
-        
+
+    def save_raw_volumes(self, destination):
+        img_l = nib.Nifti1Image(self.Vl, np.eye(4))
+        img_h = nib.Nifti1Image(self.Vh, np.eye(4))
+
+        nii_file = os.path.join(destination, 'R' + self.file.DATETIME + self.file.ID + '_raw_')
+
+        nib.save(img_l, nii_file + 'LF.nii.gz')
+        nib.save(img_h, nii_file + 'HF.nii.gz')
+
     def save_volume(self, destination, fstr = ''):
         '''
         save rgb volume
@@ -911,7 +948,7 @@ class RSOM_vessel(RSOM):
     def rescale_intensity(self):
         '''
         overrides method in class RSOM, because vessel segmentation needs 
-        different rescalé
+        different rescale
         '''
         print('Vessel rescaleINTENSITY method')
         self.Vl_1 = exposure.rescale_intensity(self.Vl_1, in_range = (0, 0.25))
