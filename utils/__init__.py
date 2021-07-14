@@ -1,1 +1,1 @@
-from .io import save_nii
+from ._io import save_nii
